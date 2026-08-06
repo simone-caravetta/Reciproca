@@ -35,7 +35,18 @@ Requires Google Chrome to be installed: `webdriver-manager` automatically downlo
 4. Set delay min/max and the session limit, then **Start Unfollow**. Progress is saved to `unfollow_progress.json`, so you can stop and resume in later sessions without starting over.
 
 ### Coming Soon...
-Semantic ranking of users during the Deep Search phase, powered by AI
+- Semantic ranking of users during the Deep Search phase, powered by AI
+- Multi-language support (see below)
+
+## Instagram language support
+
+Instagram renders its interface in the account's own language, so Reciproca has to
+match button and warning text per locale. **Currently supported: English and Italian.**
+
+All locale strings live in one block at the top of `reciproca.py`
+(`FOLLOWING_BUTTON_MARKERS`, `FOLLOW_BUTTON_MARKERS`, `UNFOLLOW_CONFIRM_MARKERS`,
+`CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a language means editing
+that block only — no call site needs to change.
 
 ## Generated files (git-ignored)
 
