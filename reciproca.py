@@ -1,5 +1,5 @@
 """
-Instagram Bot - Follow & Unfollow
+Reciproca
 Unified GUI tool: queue-based/hashtag follow, unfollow of non-followers
 (from an Instagram data export), rate limit detection, and persistent state.
 """
@@ -1633,7 +1633,7 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
 def validate_unfollow_success(original_username=None):
     """Verify the target is no longer being followed after clicking unfollow."""
     try:
-        time.sleep(2)
+        time.sleep(1)
 
         if original_username:
             current_url = driver.current_url.rstrip("/")
@@ -1762,16 +1762,18 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
 
         update_unfollow_progress(i, len(users_to_process))
 
+        action_start = time.time()
         result, reason = unfollow_user(user, delay_min, delay_max)
+        action_elapsed = time.time() - action_start
 
         uf_progress["processed"].append(user)
 
         if result:
-            log(f"✅ Unfollow {user} | {i+1}/{len(users_to_process)}", 'success')
+            log(f"✅ Unfollow {user} | {i+1}/{len(users_to_process)} (pagina+verifica: {action_elapsed:.1f}s)", 'success')
             successful += 1
             uf_progress["unfollowed"].append(user)
         else:
-            log(f"⚠️ Skip {user} | {reason}", 'warning')
+            log(f"⚠️ Skip {user} | {reason} (pagina+verifica: {action_elapsed:.1f}s)", 'warning')
             uf_progress["skipped"].append(user)
 
         uf_save_progress()
@@ -1780,8 +1782,11 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
             log("🛑 Stop rilevato, interrompo...", 'warning')
             break
 
+        # NOTE: delay_min/delay_max govern only this pause between profili.
+        # Il tempo sopra ("pagina+verifica") è il caricamento della pagina Instagram
+        # + le attese di sicurezza per confermare l'azione, non è controllato da questo delay.
         delay = random.uniform(delay_min, delay_max)
-        log(f"⏱️ Attendo {delay:.1f}s...", 'info')
+        log(f"⏱️ Attendo {delay:.1f}s (delay configurato)...", 'info')
         for _ in range(int(delay)):
             if stop_requested.is_set():
                 break
@@ -2504,7 +2509,7 @@ def show_about():
     """Show about dialog."""
     messagebox.showinfo(
         "About",
-        "Instagram Bot - Follow & Unfollow v3.0\n\n"
+        "Reciproca v3.0\n\n"
         "Features:\n"
         "• Queue-based following (session-safe)\n"
         "• Deep search via hashtags\n"
@@ -2547,7 +2552,7 @@ def setup_gui():
     global uf_progress_bar, uf_status_label, uf_stats_label, uf_start_btn, uf_stop_btn
 
     root = tk.Tk()
-    root.title("Instagram Bot - Follow & Unfollow")
+    root.title("Reciproca - Follow & Unfollow")
     root.geometry("800x700")
     root.minsize(700, 600)
 
@@ -3203,6 +3208,6 @@ For development: Lower delays to test faster, increase cooldowns if getting bloc
 # ---------------------------
 if __name__ == "__main__":
     root = setup_gui()
-    log("Instagram Bot (Follow & Unfollow) loaded", 'success')
+    log("Reciproca (Follow & Unfollow) loaded", 'success')
     log("Click 'Open Browser' to start", 'info')
     root.mainloop()

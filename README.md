@@ -1,4 +1,4 @@
-# Instagram Bot - Follow & Unfollow
+# Reciproca
 
 Tool desktop (Tkinter + Selenium) che unifica in un'unica GUI a tab:
 
@@ -16,7 +16,7 @@ Questo strumento automatizza azioni su Instagram (scraping di profili/hashtag, f
 
 ```bash
 pip install -r requirements.txt
-python instagram_bot.py
+python reciproca.py
 ```
 
 Richiede Google Chrome installato: `webdriver-manager` scarica automaticamente il ChromeDriver compatibile.
