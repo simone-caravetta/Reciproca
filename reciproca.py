@@ -1630,160 +1630,62 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
 # ---------------------------
 # UNFOLLOW LOGIC
 # ---------------------------
-def uf_get_button_state_js():
-    """Single JS round-trip check of the profile header's follow/following button state.
-    Returns 'following' | 'follow' | 'not_found'.
+def unfollow_user(username):
+    """Unfollow a single user.
 
-    This replaces reusing find_follow_button(), which iterates every button on the page
-    from Python and does up to 3 separate WebDriver calls per button (get_button_text) -
-    each one a network round-trip to the browser. On a real Instagram profile page (with
-    suggestion carousels, story highlights, etc.) that adds up to dozens of round-trips
-    per single unfollow action. Running the same scan as one execute_script() call does
-    it all inside the browser in a single round-trip, which is what made the original
-    standalone unfollow.py noticeably faster than this reused-logic version."""
-    try:
-        return driver.execute_script("""
-            let scope = document.querySelector('header') || document.querySelector('main') || document.body;
-            let buttons = scope.querySelectorAll('button');
-            let followingWords = ['following', 'segui già', 'richiesta', 'requested', 'seguendo', 'in attesa', 'message', 'messaggio'];
-            let followWords = ['follow', 'segui'];
-            for (let b of buttons) {
-                let text = (b.innerText || b.textContent || '').toLowerCase();
-                if (followingWords.some(w => text.includes(w))) return 'following';
-            }
-            for (let b of buttons) {
-                let text = (b.innerText || b.textContent || '').toLowerCase();
-                if (followWords.some(w => text.includes(w)) && !text.includes('già')) return 'follow';
-            }
-            return 'not_found';
-        """)
-    except Exception as e:
-        logger.debug(f"uf_get_button_state_js error: {e}")
-        return 'not_found'
+    Deliberately kept as a straight line: load profile, find the "Following" button,
+    click it, click the confirmation, done. This mirrors the original standalone
+    unfollow script, which was fast and predictable.
 
-
-def uf_click_following_button_js():
-    """Find and click the header's 'Following' button in a single JS round-trip."""
-    try:
-        return bool(driver.execute_script("""
-            let scope = document.querySelector('header') || document.querySelector('main') || document.body;
-            let buttons = scope.querySelectorAll('button');
-            let followingWords = ['following', 'segui già', 'richiesta', 'requested', 'seguendo', 'in attesa'];
-            for (let b of buttons) {
-                let text = (b.innerText || b.textContent || '').toLowerCase();
-                if (followingWords.some(w => text.includes(w))) {
-                    b.scrollIntoView({block: 'center'});
-                    b.click();
-                    return true;
-                }
-            }
-            return false;
-        """))
-    except Exception as e:
-        logger.debug(f"uf_click_following_button_js error: {e}")
-        return False
-
-
-def uf_click_confirm_unfollow_js():
-    """Find and click the 'Unfollow' confirmation button in the popup dialog Instagram
-    shows after clicking 'Following', in a single JS round-trip. Some UI variants toggle
-    without a dialog, so returning False here is not itself an error."""
-    try:
-        return bool(driver.execute_script("""
-            let dialog = document.querySelector("div[role='dialog']");
-            if (!dialog) return false;
-            let els = dialog.querySelectorAll('button, div[role="button"]');
-            for (let el of els) {
-                let text = (el.innerText || el.textContent || '').toLowerCase();
-                if (text.includes('unfollow') || text.includes('non seguire') || text.includes('smetti')) {
-                    el.click();
-                    return true;
-                }
-            }
-            return false;
-        """))
-    except Exception as e:
-        logger.debug(f"uf_click_confirm_unfollow_js error: {e}")
-        return False
-
-
-def validate_unfollow_success(original_username=None):
-    """Verify the target is no longer being followed after clicking unfollow."""
-    try:
-        time.sleep(1)
-
-        if original_username:
-            current_url = driver.current_url.rstrip("/")
-            if original_username not in current_url:
-                logger.debug(f"⚠️ Navigation detected after unfollow click! Now at {current_url}")
-                return False
-
-        status = uf_get_button_state_js()
-        # Success: button is back to "follow" state, or no button found at all (edge case)
-        if status in ("follow", "not_found"):
-            return True
-        if status == "following":
-            return False
-        return True
-    except Exception as e:
-        logger.debug(f"Unfollow validation error: {e}")
-        return True  # Assume success if validation fails, mirroring follow validation
-
-
-def unfollow_user(username, delay_min, delay_max, check_rate=True):
-    """Unfollow a single user with validation. Uses fast in-browser (JS) button lookups
-    instead of Python-side per-button iteration to keep each action quick."""
+    It does NOT reuse the follow side's helpers (wait_for_element, check_rate_limit,
+    find_follow_button, post-action validation): those are built for the scraping
+    flow and each one costs extra waits and many WebDriver round-trips per profile
+    - wait_for_element alone is @retry-wrapped around a 15s WebDriverWait - which is
+    what made unfollow feel far slower than the configured delay.
+    """
     try:
         uf_stats.increment('attempted')
-        target_url = f"https://www.instagram.com/{username}/"
 
-        driver.get(target_url)
-        wait_for_element(driver, By.TAG_NAME, "header")
-        time.sleep(1)
+        driver.get(f"https://www.instagram.com/{username}/")
+        time.sleep(random.uniform(1, 2))
 
-        current_url = driver.current_url.rstrip("/")
-        if username not in current_url:
-            log(f"⚠️ Redirect rilevato! Atteso {username}, skip...", 'warning')
-            return False, "redirected"
+        buttons = driver.find_elements(By.TAG_NAME, "button")
 
-        # Rate-limit detection reads the whole page body text, which is relatively
-        # expensive; checking every action isn't worth the cost, so sample it instead.
-        if check_rate and check_rate_limit(driver):
-            log(f"⚠️ Rate limit rilevato - continuo comunque (dev mode)", 'warning')
+        follow_btn = None
+        for b in buttons:
+            try:
+                txt = b.text.lower()
+            except StaleElementReferenceException:
+                continue
+            if "segui già" in txt or "following" in txt:
+                follow_btn = b
+                break
 
-        status = uf_get_button_state_js()
+        if not follow_btn:
+            return False, "non seguito"
 
-        if status == "not_found":
-            return False, "no_button"
+        driver.execute_script("arguments[0].click();", follow_btn)
+        time.sleep(random.uniform(1, 2))
 
-        if status == "follow":
-            # Not currently following this user, nothing to unfollow
-            return False, "not_following"
+        elements = driver.find_elements(By.XPATH, "//button | //div[@role='button']")
 
-        if status == "following":
-            if not uf_click_following_button_js():
-                return False, "click_failed"
+        unfollow_btn = None
+        for el in elements:
+            try:
+                txt = el.text.lower()
+            except StaleElementReferenceException:
+                continue
+            if "non seguire" in txt or "unfollow" in txt or "smetti" in txt:
+                unfollow_btn = el
+                break
 
-            time.sleep(0.7)
+        if not unfollow_btn:
+            return False, "bottone unfollow non trovato"
 
-            # Instagram usually shows a confirmation popup ("Unfollow?"); some UI
-            # variants toggle straight away, so a missed click here isn't fatal on
-            # its own - validate_unfollow_success() below is the real check.
-            uf_click_confirm_unfollow_js()
+        driver.execute_script("arguments[0].click();", unfollow_btn)
 
-            final_url = driver.current_url.rstrip("/")
-            if username not in final_url:
-                log(f"⚠️ Navigazione dopo il click! Skip...", 'warning')
-                return False, "navigation_after_click"
-
-            if validate_unfollow_success(username):
-                uf_stats.increment('succeeded')
-                return True, None
-            else:
-                uf_stats.increment('errors')
-                return False, "validation_failed"
-
-        return False, f"unexpected_status: {status}"
+        uf_stats.increment('succeeded')
+        return True, None
 
     except Exception as e:
         uf_stats.increment('errors')
@@ -1808,18 +1710,17 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
 
         update_unfollow_progress(i, len(users_to_process))
 
-        action_start = time.time()
-        result, reason = unfollow_user(user, delay_min, delay_max, check_rate=(i % 3 == 0))
-        action_elapsed = time.time() - action_start
+        log(f"\n➡️ {user}")
+        result, reason = unfollow_user(user)
 
         uf_progress["processed"].append(user)
 
         if result:
-            log(f"✅ Unfollow {user} | {i+1}/{len(users_to_process)} (pagina+verifica: {action_elapsed:.1f}s)", 'success')
+            log(f"✅ Unfollow {user} | {i+1}/{len(users_to_process)}", 'success')
             successful += 1
             uf_progress["unfollowed"].append(user)
         else:
-            log(f"⚠️ Skip {user} | {reason} (pagina+verifica: {action_elapsed:.1f}s)", 'warning')
+            log(f"⚠️ Skip {user} | {reason}", 'warning')
             uf_progress["skipped"].append(user)
 
         uf_save_progress()
@@ -1828,11 +1729,9 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
             log("🛑 Stop rilevato, interrompo...", 'warning')
             break
 
-        # NOTE: delay_min/delay_max govern only this pause between profili.
-        # Il tempo sopra ("pagina+verifica") è il caricamento della pagina Instagram
-        # + le attese di sicurezza per confermare l'azione, non è controllato da questo delay.
         delay = random.uniform(delay_min, delay_max)
-        log(f"⏱️ Attendo {delay:.1f}s (delay configurato)...", 'info')
+        log(f"⏱️ Attendo {delay:.1f}s...", 'info')
+        # Chunked so Stop stays responsive during long delays
         for _ in range(int(delay)):
             if stop_requested.is_set():
                 break
