@@ -75,6 +75,84 @@ UNFOLLOW_PROGRESS_FILE = "unfollow_progress.json"
 UNFOLLOW_SESSION_FILE = "unfollow_last_session.json"
 
 # ---------------------------
+# INSTAGRAM UI TEXT MARKERS
+# ---------------------------
+# Instagram renders its interface in the account's own language, so every button
+# and state lookup has to match text in each supported locale.
+#
+# Supported locales: English, Italian.
+#
+# These are the single source of truth - do not inline locale strings at the call
+# sites. Adding a language should mean editing this block and nothing else.
+# All comparisons run against lowercased text, so keep every entry lowercase.
+
+# Text on the button meaning "you already follow this account" (or a follow request
+# is pending). This is also the button you click to start an unfollow.
+FOLLOWING_BUTTON_MARKERS = (
+    "following", "requested",                            # EN
+    "segui già", "seguendo", "richiesta", "in attesa",    # IT
+)
+
+# Text on the plain "Follow" button. Note these are substrings of the markers above
+# ("follow" of "following", "segui" of "segui già"), so never test them on their
+# own - use is_follow_button(), which excludes the already-following case.
+FOLLOW_BUTTON_MARKERS = (
+    "follow",   # EN
+    "segui",    # IT
+)
+
+# Text that merely *signals* an existing relationship without being the follow
+# button itself: the Message button only appears on profiles you already follow.
+# Safe for lenient post-click validation, never for deciding what to click.
+FOLLOWED_SIGNAL_MARKERS = FOLLOWING_BUTTON_MARKERS + (
+    "message",     # EN
+    "messaggio",   # IT
+)
+
+# Text on the confirmation button in the "Unfollow?" dialog.
+UNFOLLOW_CONFIRM_MARKERS = (
+    "unfollow",                 # EN
+    "non seguire", "smetti",    # IT
+)
+
+# Labels on a post dialog's close button. Matched via XPath contains(), which is
+# case-sensitive, so these keep their original capitalization.
+CLOSE_BUTTON_LABELS = ("Close", "Chiudi")
+
+# Page or dialog text Instagram shows when it is throttling or blocking actions,
+# paired with the explanation surfaced in the log.
+RATE_LIMIT_MARKERS = (
+    # EN
+    ("try again later", "Try Again Later - Instagram needs you to slow down"),
+    ("action blocked", "Action Blocked - You've exceeded a limit"),
+    ("temporarily blocked", "Temporarily Blocked - Instagram locked your actions"),
+    ("too many requests", "Too Many Requests - You're hitting the API too fast"),
+    ("please wait", "Please Wait - Instagram is throttling you"),
+    # IT
+    ("riprova più tardi", "Riprova Più Tardi (IT) - Try again later"),
+    ("azione bloccata", "Azione Bloccata (IT) - Action blocked"),
+    ("temporaneamente bloccato", "Temporaneamente Bloccato (IT) - Temporarily blocked"),
+    ("troppo veloce", "Troppo Veloce (IT) - Going too fast"),
+    ("limite superato", "Limite Superato (IT) - Limit exceeded"),
+    ("attendi", "Attendi (IT) - Instagram is throttling you"),
+)
+
+
+def has_marker(text, markers):
+    """True if any marker appears in text. Text must already be lowercased."""
+    return any(m in text for m in markers)
+
+
+def is_follow_button(text):
+    """True for a plain "Follow" button.
+
+    Excludes the already-following case explicitly: "follow" is a substring of
+    "following" and "segui" of "segui già", so a naive membership test matches the
+    very button it is meant to rule out.
+    """
+    return has_marker(text, FOLLOW_BUTTON_MARKERS) and not has_marker(text, FOLLOWING_BUTTON_MARKERS)
+
+# ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
 def load_config():
@@ -691,22 +769,9 @@ def reset_unfollow_progress():
 def check_rate_limit(driver):
     """Check if Instagram is showing rate limit warnings and return info about the type."""
     try:
-        # Define error patterns and their descriptions
-        error_checks = [
-            ("try again later", "Try Again Later - Instagram needs you to slow down"),
-            ("action blocked", "Action Blocked - You've exceeded a limit"),
-            ("temporarily blocked", "Temporarily Blocked - Instagram locked your actions"),
-            ("too many requests", "Too Many Requests - You're hitting the API too fast"),
-            ("please wait", "Please Wait - Instagram is throttling you"),
-            ("riprova più tardi", "Riprova Piu' TardI (IT) - Try again later"),
-            ("azione bloccata", "Azione Bloccata (IT) - Action blocked"),
-            ("troppo veloce", "Troppo Veloce (IT) - Going too fast"),
-            ("limite superato", "Limite Superato (IT) - Limit exceeded"),
-        ]
-
         page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
 
-        for indicator, description in error_checks:
+        for indicator, description in RATE_LIMIT_MARKERS:
             if indicator in page_text:
                 log(f"⚠️ RATE LIMIT: {description}", 'warning')
                 return True
@@ -715,7 +780,7 @@ def check_rate_limit(driver):
         dialogs = driver.find_elements(By.XPATH, "//div[@role='dialog']")
         for dialog in dialogs:
             dialog_text = dialog.text.lower()
-            for indicator, description in error_checks:
+            for indicator, description in RATE_LIMIT_MARKERS:
                 if indicator in dialog_text:
                     log(f"⚠️ RATE LIMIT POPUP: {description}", 'warning')
                     return True
@@ -830,10 +895,11 @@ def get_author_profile():
 def close_post():
     """Close post dialog."""
     try:
-        # Try multiple close button patterns
+        # Try localized labels first, then locale-independent fallbacks
         selectors = [
-            "//div[@role='dialog']//button[contains(., 'Close')]",
-            "//div[@role='dialog']//button[contains(., 'Chiudi')]",
+            f"//div[@role='dialog']//button[contains(., '{label}')]"
+            for label in CLOSE_BUTTON_LABELS
+        ] + [
             "//div[@role='dialog']//button//*[name()='svg']",
             "//div[@role='dialog']//button[@aria-label='Close']",
         ]
@@ -1338,12 +1404,11 @@ def validate_follow_success(original_btn=None, original_username=None):
             current_btn_texts.append(text[:50])  # Limit for logging
 
             # Success indicators - button changed to these states
-            if any(x in text for x in ["following", "segui già", "richiesta", "requested",
-                                        "seguendo", "in attesa", "message", "messaggio"]):
+            if has_marker(text, FOLLOWED_SIGNAL_MARKERS):
                 found_following = True
 
             # If we still see a clear "Follow" button
-            if "follow" in text or ("segui" in text and "già" not in text and "following" not in text):
+            if is_follow_button(text):
                 found_follow = True
 
         # Log for debugging
@@ -1355,8 +1420,10 @@ def validate_follow_success(original_btn=None, original_username=None):
         if found_following:
             return True
 
-        # 2. Original button was "Follow" and now we see different text
-        if original_text and ("follow" in original_text or "segui" in original_text):
+        # 2. Original button was "Follow" and now we see different text.
+        # Intentionally coarse: this also matches "Following", which is fine here -
+        # we only care that the original button was follow-related at all.
+        if original_text and has_marker(original_text, FOLLOW_BUTTON_MARKERS):
             # Button changed - likely succeeded
             if not found_follow:
                 return True
@@ -1393,15 +1460,16 @@ def find_follow_button():
                 header = driver.find_element(By.XPATH, header_xpath)
                 # Now find follow button only within this header section
                 header_html = header.get_attribute('innerHTML')
-                if 'follow' in header_html.lower() or 'segui' in header_html.lower():
+                # Cheap gate: does this header mention follow at all (any state)?
+                if has_marker(header_html.lower(), FOLLOW_BUTTON_MARKERS):
                     # Search for buttons within the header
                     buttons_in_header = header.find_elements(By.TAG_NAME, "button")
                     for btn in buttons_in_header:
                         text = get_button_text(btn)
-                        # Skip if already following
-                        if any(x in text for x in ["following", "segui già", "richiesta", "requested", "seguendo", "messaggio", "message"]):
+                        # Skip if already following (or only a Message button)
+                        if has_marker(text, FOLLOWED_SIGNAL_MARKERS):
                             continue
-                        if "follow" in text or "segui" in text:
+                        if is_follow_button(text):
                             return btn, "follow"
             except NoSuchElementException:
                 continue
@@ -1414,12 +1482,12 @@ def find_follow_button():
 
         for idx, btn in enumerate(all_buttons):
             text = get_button_text(btn)
-            if any(x in text for x in ["following", "segui già", "richiesta", "requested", "seguendo"]):
+            if has_marker(text, FOLLOWING_BUTTON_MARKERS):
                 if first_follow_btn is None:
                     first_follow_btn = btn
                     first_follow_idx = idx
                     return btn, "already_following"
-            if "follow" in text or "segui" in text:
+            if is_follow_button(text):
                 if first_follow_btn is None:
                     first_follow_btn = btn
                     first_follow_idx = idx
@@ -1435,9 +1503,8 @@ def find_follow_button():
                 location = btn.location
                 if location['y'] < 500:  # Profile header is typically in upper portion
                     text = get_button_text(btn)
-                    if "follow" in text or "segui" in text:
-                        if not any(x in text for x in ["following", "segui già", "richiesta", "requested", "seguendo"]):
-                            return btn, "follow"
+                    if is_follow_button(text):
+                        return btn, "follow"
             except:
                 continue
 
@@ -1657,7 +1724,7 @@ def unfollow_user(username):
                 txt = b.text.lower()
             except StaleElementReferenceException:
                 continue
-            if "segui già" in txt or "following" in txt:
+            if has_marker(txt, FOLLOWING_BUTTON_MARKERS):
                 follow_btn = b
                 break
 
@@ -1675,7 +1742,7 @@ def unfollow_user(username):
                 txt = el.text.lower()
             except StaleElementReferenceException:
                 continue
-            if "non seguire" in txt or "unfollow" in txt or "smetti" in txt:
+            if has_marker(txt, UNFOLLOW_CONFIRM_MARKERS):
                 unfollow_btn = el
                 break
 
