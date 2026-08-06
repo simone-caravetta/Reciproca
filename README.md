@@ -34,6 +34,9 @@ Richiede Google Chrome installato: `webdriver-manager` scarica automaticamente i
 3. Tab **🚫 Unfollow** → **Carica JSON**, seleziona i due file. Il tool calcola automaticamente chi segui ma non ti segue indietro.
 4. Imposta delay min/max e limite sessione, poi **Start Unfollow**. Il progresso viene salvato in `unfollow_progress.json`, quindi puoi fermarti e riprendere in sessioni successive senza ripartire da zero.
 
+### Coming Soon...
+Ranking semantico degli utenti durante la fase di Deep Search tramite Ai
+
 ## File generati (esclusi da git)
 
 `chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, log vari — vedi `.gitignore`.
