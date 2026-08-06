@@ -1,16 +1,16 @@
 # Reciproca
 
-Tool desktop (Tkinter + Selenium) che unifica in un'unica GUI a tab:
+Desktop tool (Tkinter + Selenium) that unifies everything into a single tabbed GUI:
 
-- **🎯 Auto Follow** — follow automatico da coda persistente o via ricerca hashtag ("Deep Search"), con rilevamento rate-limit, batch cooldown e retry.
-- **🚫 Unfollow** — smette di seguire automaticamente chi non ti segue indietro, calcolato dai file `followers.json` / `following.json` esportati da Instagram. Riusa lo stesso browser/login del tab Follow.
-- **📋 Follow Queue** — gestione della coda utenti da seguire (import/export, aggiunta/rimozione manuale).
-- **⚙️ Settings** — parametri di estrazione, timing di follow/unfollow e impostazioni tecniche, persistiti in `bot_config.json`.
-- **📝 Logs** — log colorato in tempo reale, esportabile su file.
+- **🎯 Auto Follow** — automatic following from a persistent queue or via hashtag search ("Deep Search"), with rate-limit detection, batch cooldowns and retries.
+- **🚫 Unfollow** — automatically unfollows people who don't follow you back, computed from the `followers.json` / `following.json` files exported by Instagram. Reuses the same browser/login as the Follow tab.
+- **📋 Follow Queue** — management of the queue of users to follow (import/export, manual add/remove).
+- **⚙️ Settings** — extraction parameters, follow/unfollow timing and technical settings, persisted to `bot_config.json`.
+- **📝 Logs** — real-time colored log, exportable to file.
 
-## ⚠️ Avviso importante
+## ⚠️ Important notice
 
-Questo strumento automatizza azioni su Instagram (scraping di profili/hashtag, follow/unfollow massivo) tramite un browser controllato da Selenium, incluse misure per ridurre il rilevamento come bot. Questo genere di automazione **viola i Termini di Servizio di Instagram** e può portare a limitazioni temporanee o al ban dell'account usato. Usalo a tuo rischio, con un account che sei disposto a perdere, e mantieni delay/limiti conservativi.
+This tool automates actions on Instagram (profile/hashtag scraping, bulk follow/unfollow) through a Selenium-controlled browser, including measures to reduce bot detection. This kind of automation **violates Instagram's Terms of Service** and can lead to temporary restrictions or a ban of the account used. Use it at your own risk, with an account you are willing to lose, and keep delays/limits conservative.
 
 ## Setup
 
@@ -19,28 +19,28 @@ pip install -r requirements.txt
 python reciproca.py
 ```
 
-Richiede Google Chrome installato: `webdriver-manager` scarica automaticamente il ChromeDriver compatibile.
+Requires Google Chrome to be installed: `webdriver-manager` automatically downloads the matching ChromeDriver.
 
-## Uso rapido
+## Quick start
 
 ### Follow
-1. Tab **Auto Follow** → **Open Browser**, esegui il login manuale su Instagram.
-2. Scegli la modalità: **Follow from Queue** (segue utenti già in coda) oppure **Deep Search** (cerca nuovi utenti tramite hashtag e li aggiunge in coda).
-3. Imposta delay min/max e limite follow per la sessione, poi **Start Following**.
+1. **Auto Follow** tab → **Open Browser**, then log into Instagram manually.
+2. Pick the mode: **Follow from Queue** (follows users already queued) or **Deep Search** (finds new users via hashtags and adds them to the queue).
+3. Set delay min/max and the follow limit for the session, then **Start Following**.
 
 ### Unfollow
-1. Da Instagram: **Impostazioni → Privacy e sicurezza → Scarica i tuoi dati**, richiedi l'export in formato JSON e scarica `followers_1.json` (o simile) e `following.json`.
-2. Tab **Auto Follow** → **Open Browser** (se non già aperto) e fai login.
-3. Tab **🚫 Unfollow** → **Carica JSON**, seleziona i due file. Il tool calcola automaticamente chi segui ma non ti segue indietro.
-4. Imposta delay min/max e limite sessione, poi **Start Unfollow**. Il progresso viene salvato in `unfollow_progress.json`, quindi puoi fermarti e riprendere in sessioni successive senza ripartire da zero.
+1. In Instagram: **Settings → Privacy and security → Download your data**, request the export in JSON format and download `followers_1.json` (or similar) and `following.json`.
+2. **Auto Follow** tab → **Open Browser** (if not already open) and log in.
+3. **🚫 Unfollow** tab → **Carica JSON**, select the two files. The tool automatically computes who you follow that doesn't follow you back.
+4. Set delay min/max and the session limit, then **Start Unfollow**. Progress is saved to `unfollow_progress.json`, so you can stop and resume in later sessions without starting over.
 
 ### Coming Soon...
-Ranking semantico degli utenti durante la fase di Deep Search tramite Ai
+Semantic ranking of users during the Deep Search phase, powered by AI
 
-## File generati (esclusi da git)
+## Generated files (git-ignored)
 
-`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, log vari — vedi `.gitignore`.
+`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.
 
-## Licenza
+## License
 
-GPL-3.0, vedi [LICENSE](LICENSE).
+GPL-3.0, see [LICENSE](LICENSE).
