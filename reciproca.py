@@ -418,10 +418,10 @@ def uf_load_json_files():
     global uf_followers, uf_following, uf_non_followers
 
     try:
-        f1 = filedialog.askopenfilename(title="Seleziona followers.json")
+        f1 = filedialog.askopenfilename(title="Select followers.json")
         if not f1:
             return
-        f2 = filedialog.askopenfilename(title="Seleziona following.json")
+        f2 = filedialog.askopenfilename(title="Select following.json")
         if not f2:
             return
 
@@ -430,10 +430,10 @@ def uf_load_json_files():
         uf_non_followers = list(uf_following - uf_followers)
 
         if len(uf_non_followers) == 0:
-            messagebox.showerror("Errore", "Nessun utente trovato (nessun non-follower)")
+            messagebox.showerror("Error", "No users found (no non-followers)")
             return
 
-        log(f"✔ File JSON caricati: {len(uf_non_followers)} non-follower trovati", 'success')
+        log(f"✔ JSON files loaded: {len(uf_non_followers)} non-followers found", 'success')
 
         with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
             json.dump({"followers_file": f1, "following_file": f2}, f)
@@ -443,7 +443,7 @@ def uf_load_json_files():
         refresh_unfollow_display()
 
     except Exception as e:
-        messagebox.showerror("Errore", f"File non validi:\n{e}")
+        messagebox.showerror("Error", f"Invalid files:\n{e}")
         logger.exception("Error loading unfollow JSON files")
 
 def uf_auto_load_last_session():
@@ -461,14 +461,14 @@ def uf_auto_load_last_session():
         f2 = data.get("following_file")
 
         if not f1 or not f2 or not os.path.exists(f1) or not os.path.exists(f2):
-            log("⚠️ Sessione unfollow salvata ma file JSON non trovati, ricaricali manualmente", 'warning')
+            log("⚠️ Saved unfollow session found but JSON files are missing, reload them manually", 'warning')
             return
 
         uf_followers = uf_load_followers(f1)
         uf_following = uf_load_following(f2)
         uf_non_followers = list(uf_following - uf_followers)
 
-        log(f"🔄 Sessione unfollow ricaricata: {len(uf_non_followers)} non-follower", 'info')
+        log(f"🔄 Unfollow session reloaded: {len(uf_non_followers)} non-followers", 'info')
         uf_load_progress()
         update_unfollow_ui_state()
 
@@ -1662,7 +1662,7 @@ def unfollow_user(username):
                 break
 
         if not follow_btn:
-            return False, "non seguito"
+            return False, "not following"
 
         driver.execute_script("arguments[0].click();", follow_btn)
         time.sleep(random.uniform(1, 2))
@@ -1680,7 +1680,7 @@ def unfollow_user(username):
                 break
 
         if not unfollow_btn:
-            return False, "bottone unfollow non trovato"
+            return False, "unfollow button not found"
 
         driver.execute_script("arguments[0].click();", unfollow_btn)
 
@@ -1696,16 +1696,16 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
     """Unfollow users from the non-followers list, tracking progress for resumability."""
     successful = 0
 
-    log(f"📋 Non-follower da processare: {len(users_to_process)}")
-    log(f"🎯 Target: {limit} unfollow in questa sessione")
+    log(f"📋 Non-followers to process: {len(users_to_process)}")
+    log(f"🎯 Target: {limit} unfollows this session")
 
     for i, user in enumerate(users_to_process):
         if stop_requested.is_set():
-            log("⏹️ Fermato dall'utente", 'warning')
+            log("⏹️ Stopped by user", 'warning')
             break
 
         if successful >= limit:
-            log(f"✅ Raggiunto il target di {limit} unfollow", 'success')
+            log(f"✅ Reached target of {limit} unfollows", 'success')
             break
 
         update_unfollow_progress(i, len(users_to_process))
@@ -1726,11 +1726,11 @@ def unfollow_from_list(users_to_process, delay_min, delay_max, limit):
         uf_save_progress()
 
         if stop_requested.is_set():
-            log("🛑 Stop rilevato, interrompo...", 'warning')
+            log("🛑 Stop detected, breaking...", 'warning')
             break
 
         delay = random.uniform(delay_min, delay_max)
-        log(f"⏱️ Attendo {delay:.1f}s...", 'info')
+        log(f"⏱️ Waiting {delay:.1f}s...", 'info')
         # Chunked so Stop stays responsive during long delays
         for _ in range(int(delay)):
             if stop_requested.is_set():
@@ -1754,29 +1754,29 @@ def unfollow_logic():
             delay_max = int(uf_delay_max_entry.get())
             limit = int(uf_limit_entry.get())
         except ValueError:
-            log("❌ Valori numerici non validi!", 'error')
-            messagebox.showerror("Error", "Inserisci numeri validi")
+            log("❌ Invalid numeric input!", 'error')
+            messagebox.showerror("Error", "Please enter valid numbers")
             return
 
         if driver is None:
-            log("❌ Browser non aperto!", 'error')
-            messagebox.showerror("Error", "Apri prima il browser (tab Auto Follow)")
+            log("❌ Browser not open!", 'error')
+            messagebox.showerror("Error", "Please open the browser first (Auto Follow tab)")
             return
 
         if not uf_non_followers:
-            log("❌ Nessun dato caricato! Carica prima followers.json e following.json", 'error')
-            messagebox.showerror("Error", "Carica prima i file JSON")
+            log("❌ No data loaded! Load followers.json and following.json first", 'error')
+            messagebox.showerror("Error", "Please load the JSON files first")
             return
 
         uf_load_progress()
         to_process = [u for u in uf_non_followers if u not in uf_progress["processed"]]
 
         if not to_process:
-            log("✔ Tutti i non-follower sono già stati processati", 'success')
-            messagebox.showinfo("Completato", "Tutti i non-follower sono già stati processati.\nUsa 'Reset' per ricominciare.")
+            log("✔ All non-followers have already been processed", 'success')
+            messagebox.showinfo("Completed", "All non-followers have already been processed.\nUse 'Reset' to start over.")
             return
 
-        log(f"🚀 Avvio UNFOLLOW: {len(to_process)} utenti rimasti da processare")
+        log(f"🚀 Starting UNFOLLOW: {len(to_process)} users left to process")
 
         uf_start_btn.config(state='disabled')
         uf_stop_btn.config(state='normal')
@@ -1789,10 +1789,10 @@ def unfollow_logic():
 
         report = uf_stats.report()
         log(f"\n{report}", 'success')
-        messagebox.showinfo("Sessione completata", report)
+        messagebox.showinfo("Session Complete", report)
 
     except Exception as e:
-        log(f"❌ Errore fatale: {e}", 'error')
+        log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in unfollow_logic")
     finally:
         uf_start_btn.config(state='normal')
@@ -1816,9 +1816,9 @@ def update_unfollow_ui_state():
         ready = driver is not None and (len(uf_non_followers) > 0 or os.path.exists(UNFOLLOW_PROGRESS_FILE))
         uf_start_btn.config(state='normal' if ready else 'disabled')
         if ready:
-            uf_data_label.config(text=f"🟢 {len(uf_non_followers)} non-follower pronti")
+            uf_data_label.config(text=f"🟢 {len(uf_non_followers)} non-followers ready")
         else:
-            uf_data_label.config(text="🟡 Apri il browser e carica i JSON")
+            uf_data_label.config(text="🟡 Open the browser and load the JSON files")
     except Exception as e:
         logger.debug(f"update_unfollow_ui_state error: {e}")
 
@@ -1829,8 +1829,8 @@ def refresh_unfollow_display():
         uf_load_progress()
         remaining = len([u for u in uf_non_followers if u not in uf_progress.get("processed", [])])
         uf_data_label.config(
-            text=f"🟢 {len(uf_non_followers)} non-follower | {remaining} da processare | "
-                 f"{len(uf_progress.get('unfollowed', []))} già rimossi"
+            text=f"🟢 {len(uf_non_followers)} non-followers | {remaining} to process | "
+                 f"{len(uf_progress.get('unfollowed', []))} already removed"
         )
     except Exception as e:
         logger.debug(f"refresh_unfollow_display error: {e}")
@@ -1840,7 +1840,7 @@ def reset_unfollow_app():
     """Reset unfollow progress/session (does not touch follow queue/history)."""
     global uf_followers, uf_following, uf_non_followers, uf_progress
 
-    if messagebox.askyesno("Conferma", "Azzerare progresso e sessione di unfollow?"):
+    if messagebox.askyesno("Confirm", "Reset unfollow progress and session?"):
         if os.path.exists(UNFOLLOW_PROGRESS_FILE):
             os.remove(UNFOLLOW_PROGRESS_FILE)
         if os.path.exists(UNFOLLOW_SESSION_FILE):
@@ -1853,7 +1853,7 @@ def reset_unfollow_app():
 
         update_unfollow_ui_state()
         reset_unfollow_progress()
-        log("🔄 Reset unfollow completato", 'info')
+        log("🔄 Unfollow reset complete", 'info')
 
 
 # Global variable to store user frequencies from last scrape - load from file on startup
@@ -2712,14 +2712,14 @@ def setup_gui():
     # ==================== UNFOLLOW TAB ====================
 
     # Data section
-    uf_data_frame = ttk.LabelFrame(unfollow_tab, text='📂 Dati (export Instagram)', padding=10)
+    uf_data_frame = ttk.LabelFrame(unfollow_tab, text='📂 Data (Instagram export)', padding=10)
     uf_data_frame.pack(fill='x', pady=(0, 10))
 
     ttk.Label(
         uf_data_frame,
-        text="Carica i file followers.json e following.json scaricati dalle\n"
-             "impostazioni Instagram (Privacy e sicurezza > Scarica i tuoi dati).\n"
-             "Il tool calcola chi segui ma non ti segue indietro.",
+        text="Load the followers.json and following.json files downloaded from your\n"
+             "Instagram settings (Privacy and security > Download your data).\n"
+             "The tool works out who you follow that doesn't follow you back.",
         justify='left'
     ).pack(anchor='w', pady=(0, 8))
 
@@ -2727,12 +2727,12 @@ def setup_gui():
     uf_data_btn_frame.pack(fill='x')
 
     ttk.Button(
-        uf_data_btn_frame, text='📥 Carica JSON', command=uf_load_json_files
+        uf_data_btn_frame, text='📥 Load JSON', command=uf_load_json_files
     ).pack(side='left', padx=(0, 10))
 
     uf_data_label = ttk.Label(
         uf_data_btn_frame,
-        text="🟡 Apri il browser e carica i JSON",
+        text="🟡 Open the browser and load the JSON files",
         font=('Helvetica', 9, 'italic'),
         foreground='gray'
     )
@@ -2754,12 +2754,12 @@ def setup_gui():
     uf_delay_max_entry.insert(0, str(CONFIG["UNFOLLOW_DELAY_MAX"]))
     uf_delay_max_entry.pack(side='left', padx=(0, 10))
 
-    ttk.Label(uf_timing_frame, text='Limite sessione:').pack(side='left', padx=(0, 3))
+    ttk.Label(uf_timing_frame, text='Session Limit:').pack(side='left', padx=(0, 3))
     uf_limit_entry = ttk.Entry(uf_timing_frame, width=6, validate='key', validatecommand=uf_vcmd)
     uf_limit_entry.insert(0, str(CONFIG["UNFOLLOW_DAILY_LIMIT"]))
     uf_limit_entry.pack(side='left', padx=(0, 10))
 
-    ToolTip(uf_limit_entry, "Numero massimo di unfollow in questa sessione. Il progresso viene salvato per riprendere dopo.")
+    ToolTip(uf_limit_entry, "Maximum unfollows this session. Progress is saved so you can resume later.")
 
     # Progress section
     uf_progress_frame = ttk.LabelFrame(unfollow_tab, text='Progress', padding=10)
@@ -2810,7 +2810,7 @@ def setup_gui():
 
     ttk.Label(
         unfollow_tab,
-        text="Nota: usa lo stesso browser/login del tab 'Auto Follow'. Apri il browser da lì prima di iniziare.",
+        text="Note: uses the same browser/login as the 'Auto Follow' tab. Open the browser there before starting.",
         foreground='gray',
         font=('Helvetica', 8, 'italic')
     ).pack(anchor='w', pady=(0, 5))
