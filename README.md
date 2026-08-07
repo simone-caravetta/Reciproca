@@ -52,13 +52,38 @@ that block only — no call site needs to change.
 
 PyInstaller cannot cross-compile, so a Windows `.exe` has to be built **on Windows**.
 
+### Prerequisites
+
+- **Python 3.14.3**, which ships **Tcl/Tk 8.6** — both are reported in the banner
+  `build.bat` prints before it starts
+- Python installed **with the "tcl/tk and IDLE" option**. It is optional in the
+  installer and easy to leave out; without it there is no tkinter and no GUI.
+  Already installed without it? Re-run the installer and choose *Modify*.
+
+> **Check the Tk line in the banner: it must read 8.6.**
+>
+> If it reads 9.0 you are on a different Python, and the build will succeed and
+> then fail at startup in `pyi_rth_tkinter` — on that machine only, while your
+> other one keeps working, which makes it look like a code problem. Tcl/Tk 9
+> changed its directory layout and PyInstaller bundles it differently.
+>
+> This is the whole reason to keep build machines on the same Python version, and
+> the banner turns it into a one-second check.
+
+### Build
+
 ```bat
 build.bat
 ```
 
-That installs the dependencies plus PyInstaller and produces `dist\Reciproca\Reciproca.exe`.
+It prints the interpreter, Python version and Tk version it is about to use, then
+installs the dependencies plus PyInstaller and produces `dist\Reciproca\Reciproca.exe`.
+Check that banner first whenever a build misbehaves — a machine with more than one
+Python is the usual explanation.
+
 To build by hand instead: `pip install -r requirements.txt pyinstaller` then
-`pyinstaller reciproca.spec`.
+`pyinstaller reciproca.spec`. Delete `build\` first if you have upgraded anything:
+PyInstaller caches its analysis there, and a stale cache silently undoes the upgrade.
 
 This is a **one-folder** build: keep everything inside `dist\Reciproca\` together —
 the executable needs the files next to it. Copy that whole folder wherever you like.
