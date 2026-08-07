@@ -179,6 +179,107 @@ def is_follow_button(text):
     """
     return has_marker(text, FOLLOW_BUTTON_MARKERS) and not has_marker(text, FOLLOWING_BUTTON_MARKERS)
 
+
+# ---------------------------
+# FOLLOWERS-DIALOG EXTRACTION SCRIPT
+# ---------------------------
+# Runs inside the browser against the open followers dialog. Kept as a named
+# constant rather than inlined so the row-walking logic can be exercised against
+# a synthetic DOM in tests - that walk is the fragile part of this feature.
+#
+# Called with one argument: the list of "already following" markers, passed in
+# from FOLLOWING_BUTTON_MARKERS so locale strings stay defined in exactly one
+# place. Returns {kept, skippedFollowing, rowsWithoutButton, rowsInspected}.
+EXTRACT_FOLLOWERS_JS = r"""
+const followingMarkers = arguments[0];
+const RESERVED = ['p', 'explore', 'accounts', 'direct', 'emails', 'reels', 'stories',
+                  'help', 'about', 'blog', 'jobs', 'privacy', 'terms', 'locations',
+                  'language', 'developers', 'settings'];
+
+const dialog = document.querySelector("div[role='dialog']");
+if (!dialog) return {kept: [], skippedFollowing: 0, rowsWithoutButton: 0, rowsInspected: 0};
+
+// Username out of an href like "/mario/" - null for anything that is not a
+// plain profile link.
+function usernameFromLink(link) {
+    const href = link.getAttribute('href');
+    if (!href) return null;
+    const match = href.match(/^\/([^/]+)\/?$/);
+    if (!match) return null;
+    const username = match[1];
+    if (!username || username.length <= 1) return null;
+    if (RESERVED.includes(username)) return null;
+    if (username.includes('.') || username.includes('?')) return null;
+    if (username.startsWith('__') || username.startsWith('dm_')) return null;
+    return username;
+}
+
+function usersInside(node) {
+    const found = new Set();
+    node.querySelectorAll('a[href^="/"]').forEach(a => {
+        const u = usernameFromLink(a);
+        if (u) found.add(u);
+    });
+    return found;
+}
+
+// Smallest ancestor that still belongs to this user alone and carries a button.
+// Two stop conditions, whichever comes first: the node already holds a button,
+// or the next step up would swallow a different user's link (a row boundary).
+// The depth cap is purely defensive, so an unexpected DOM cannot walk to <body>.
+function findRow(link, username) {
+    let row = link;
+    for (let depth = 0; depth < 8; depth++) {
+        if (row.querySelector('button')) return row;
+        const parent = row.parentElement;
+        if (!parent || parent === dialog) break;
+        const users = usersInside(parent);
+        let foreign = false;
+        users.forEach(u => { if (u !== username) foreign = true; });
+        if (foreign) break;
+        row = parent;
+    }
+    return row.querySelector('button') ? row : null;
+}
+
+const kept = [];
+const seen = new Set();
+let skippedFollowing = 0;
+let rowsWithoutButton = 0;
+let rowsInspected = 0;
+
+dialog.querySelectorAll('a[href^="/"]').forEach(link => {
+    const username = usernameFromLink(link);
+    if (!username || seen.has(username)) return;
+    seen.add(username);
+    rowsInspected++;
+
+    const row = findRow(link, username);
+    if (!row) {
+        // Fail open: keeping a candidate is far less harmful than silently
+        // dropping everyone if Instagram's markup changes. rowsWithoutButton
+        // is what makes such a regression visible instead of silent.
+        rowsWithoutButton++;
+        kept.push(username);
+        return;
+    }
+
+    let following = false;
+    row.querySelectorAll('button').forEach(btn => {
+        const text = (btn.innerText || btn.textContent || '').toLowerCase();
+        if (followingMarkers.some(m => text.includes(m))) following = true;
+    });
+
+    if (following) {
+        skippedFollowing++;
+    } else {
+        kept.push(username);
+    }
+});
+
+return {kept, skippedFollowing, rowsWithoutButton, rowsInspected};
+"""
+
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -1338,59 +1439,58 @@ def extract_users_from_followers(current_hashtag="", author_num=0, total_authors
 
         log(f"📊 Completed {scroll_count} scrolls, found ~{last_user_count} user elements")
 
-        # Final extraction with improved filtering
+        # Final extraction. Each row's follow button is read so accounts you
+        # already follow never enter the ranking or the queue.
         try:
-            usernames = driver.execute_script("""
-                let dialog = document.querySelector("div[role='dialog']");
-                if (!dialog) return [];
+            result = driver.execute_script(
+                EXTRACT_FOLLOWERS_JS, list(FOLLOWING_BUTTON_MARKERS)
+            ) or {}
 
-                let links = dialog.querySelectorAll('a[href^="/"]');
-                let usernames = [];
+            candidates = result.get('kept', [])
+            skipped_following = result.get('skippedFollowing', 0)
+            rows_without_button = result.get('rowsWithoutButton', 0)
+            rows_inspected = result.get('rowsInspected', 0)
 
-                links.forEach(link => {
-                    let href = link.getAttribute('href');
-                    if (href) {
-                        let match = href.match(/^\\/([^/]+)\\/?$/);
-                        if (match) {
-                            let username = match[1];
-                            // Enhanced filtering
-                            if (username &&
-                                username.length > 1 &&
-                                !['p', 'explore', 'accounts', 'direct', 'emails', 'reels', 'stories', 'help', 'about', 'blog', 'jobs', 'privacy', 'terms', 'locations', 'language', 'developers', 'settings'].includes(username) &&
-                                !username.includes('.') &&
-                                !username.includes('?') &&
-                                !username.startsWith('__') &&
-                                !username.startsWith('dm_')) {
-                                usernames.push(username);
-                            }
-                        }
-                    }
-                });
-                return usernames;
-            """)
-
-            # Deduplicate while preserving order
-            seen = set()
-            unique_users = []
-            for u in usernames:
-                if u not in seen:
-                    seen.add(u)
-                    unique_users.append(u)
-
-            log(f"📊 Extracted {len(unique_users)} unique users")
-
-            if len(unique_users) < 5:
-                logger.warning(f"Low user count: {len(unique_users)}")
-
-            # Filter out already followed users BEFORE returning
+            # Second, independent net: the bot's own history. Covers users
+            # followed in an earlier session whose button Instagram has not
+            # refreshed yet.
             filtered_users = []
-            for user in unique_users:
-                if not is_already_followed(user):
-                    filtered_users.append(user)
+            skipped_history = 0
+            for user in candidates:
+                if is_already_followed(user):
+                    skipped_history += 1
+                    logger.debug(f"Filtered out already followed user (history): {user}")
                 else:
-                    logger.debug(f"Filtered out already followed user: {user}")
+                    filtered_users.append(user)
 
-            logger.info(f"Filtered {len(unique_users) - len(filtered_users)} already followed users")
+            total_skipped = skipped_following + skipped_history
+            log(
+                f"📊 Extracted {len(filtered_users)} candidates "
+                f"({rows_inspected} rows, skipped {total_skipped} already followed: "
+                f"{skipped_following} by button, {skipped_history} by history)"
+            )
+
+            # If not a single row yielded a button, the row lookup is broken -
+            # every user is being kept by the fail-open path, which looks exactly
+            # like having no filter at all. Say so instead of failing silently.
+            if rows_inspected and rows_without_button == rows_inspected:
+                log(
+                    "⚠️ Could not read the follow button on any row - "
+                    "already-followed users are NOT being filtered out. "
+                    "Instagram's layout may have changed.",
+                    'warning'
+                )
+                logger.warning(
+                    f"Row lookup failed for all {rows_inspected} rows in the followers dialog"
+                )
+            elif rows_without_button:
+                logger.info(
+                    f"{rows_without_button}/{rows_inspected} rows had no readable button (kept)"
+                )
+
+            if len(filtered_users) < 5:
+                logger.warning(f"Low user count: {len(filtered_users)}")
+
             return filtered_users
 
         except Exception as e:
