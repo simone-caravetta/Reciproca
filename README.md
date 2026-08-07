@@ -80,6 +80,20 @@ Notes:
   machine has `urllib3`/`charset_normalizer` versions `requests` doesn't
   recognise. It does not affect the app.
 
+## Tests
+
+`tests/test_extraction.js` checks the followers-dialog extraction: that each row's
+follow button is matched to the right user, so accounts you already follow are
+excluded. It reads the script straight out of `reciproca.py`, so it cannot drift
+from the shipped code.
+
+```bash
+npm install jsdom
+node tests/test_extraction.js
+```
+
+Node and jsdom are only needed for this test, not to run the app.
+
 ## Generated files (git-ignored)
 
 `chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.
