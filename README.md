@@ -74,6 +74,11 @@ Notes:
   one-folder build trips this far less often than a one-file build.
 - **Debugging a build that won't start.** Set `console=False` to `True` in
   `reciproca.spec` and rebuild to get a console window showing the traceback.
+  Errors while opening the browser are also written in full to `follow_bot.log`
+  next to the executable, so you can diagnose without rebuilding.
+- **A `RequestsDependencyWarning` at startup is harmless** — it means the build
+  machine has `urllib3`/`charset_normalizer` versions `requests` doesn't
+  recognise. It does not affect the app.
 
 ## Generated files (git-ignored)
 

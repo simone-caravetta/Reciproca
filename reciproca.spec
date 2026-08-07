@@ -11,26 +11,34 @@
 # next to the executable - see app_dir() in reciproca.py - so that folder needs to
 # be somewhere the user can write to. Program Files is a bad choice for that.
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 block_cipher = None
+
+# Selenium 4 imports its driver classes lazily: `webdriver.ChromeOptions` is not
+# imported at startup but resolved at call time through a module-level __getattr__
+# that calls importlib. PyInstaller's static analysis cannot see through that, so
+# selenium.webdriver.chrome.* would be missing from the bundle and the app would
+# only fail once you click "Open Browser" - long after startup looked fine.
+# Collecting the whole package sidesteps the entire class of problem.
+hidden_imports = collect_submodules('selenium') + collect_submodules('webdriver_manager') + [
+    'requests',
+    'packaging',
+    'packaging.version',
+    'packaging.specifiers',
+]
+
+# Selenium ships small .js helpers next to its Python sources that it reads at
+# runtime; they are data, not modules, so they need collecting separately.
+extra_datas = collect_data_files('selenium')
 
 
 a = Analysis(
     ['reciproca.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[
-        # webdriver-manager resolves the right ChromeDriver at runtime; its HTTP
-        # and version-parsing dependencies are reached dynamically, so PyInstaller
-        # does not always pick them up on its own.
-        'webdriver_manager',
-        'webdriver_manager.chrome',
-        'webdriver_manager.core',
-        'requests',
-        'packaging',
-        'packaging.version',
-        'packaging.specifiers',
-    ],
+    datas=extra_datas,
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

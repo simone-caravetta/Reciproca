@@ -20,11 +20,9 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 from selenium import webdriver
 from selenium.common.exceptions import (
-    ElementNotInteractableException,
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
-    WebDriverException,
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -834,6 +832,19 @@ def wait_for_clickable(driver, by, value, timeout=CONFIG["BROWSER_TIMEOUT"]):
     wait = WebDriverWait(driver, timeout)
     return wait.until(EC.element_to_be_clickable((by, value)))
 
+def start_browser():
+    """Open the browser on a worker thread.
+
+    ChromeDriverManager().install() can download a driver, which takes long enough
+    to freeze the GUI if it runs on the Tk callback thread - the window stops
+    repainting and the app looks hung.
+    """
+    browser_btn.config(state='disabled')
+    thread = threading.Thread(target=open_browser, daemon=True)
+    thread.start()
+    active_threads.append(thread)
+
+
 def open_browser():
     """Open Chrome browser with persistent profile."""
     global driver
@@ -867,9 +878,19 @@ def open_browser():
         browser_btn.config(state='disabled')
         update_unfollow_ui_state()
 
-    except WebDriverException as e:
-        log(f"❌ Browser error: {e}", 'error')
-        messagebox.showerror("Browser Error", str(e))
+    except Exception as e:
+        # Deliberately broad. A frozen build has no console, so anything not caught
+        # here vanishes silently and the log just stops after "Initializing Chrome"
+        # with no indication of why. Record the full traceback in follow_bot.log,
+        # which sits next to the executable, and surface the error in the GUI.
+        logger.exception("Failed to open browser")
+        log(f"❌ Browser error: {type(e).__name__}: {e}", 'error')
+        log("   Full traceback written to follow_bot.log", 'error')
+        messagebox.showerror(
+            "Browser Error",
+            f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details."
+        )
+        browser_btn.config(state='normal')
 
 def stop_bot():
     """Request graceful stop."""
@@ -2780,7 +2801,7 @@ def setup_gui():
     browser_btn = ttk.Button(
         control_frame,
         text='🌐 Open Browser',
-        command=open_browser,
+        command=start_browser,
         width=20
     )
     browser_btn.pack(side='left', padx=5)
