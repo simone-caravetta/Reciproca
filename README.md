@@ -52,13 +52,33 @@ that block only — no call site needs to change.
 
 PyInstaller cannot cross-compile, so a Windows `.exe` has to be built **on Windows**.
 
+### Prerequisites
+
+- **Python 3.14.3** — see the note below on why the exact version matters
+- Python installed **with the "tcl/tk and IDLE" option**. It is optional in the
+  installer and easy to leave out; without it there is no tkinter and no GUI.
+  Already installed without it? Re-run the installer and choose *Modify*.
+
+> **Keep every build machine on the same Python version.** Different versions ship
+> different Tcl/Tk releases, and PyInstaller bundles Tk differently for each. A
+> mismatch produces a build that succeeds and then fails at startup in
+> `pyi_rth_tkinter` — on one machine only, while the other keeps working. Chasing
+> that costs far more time than keeping the versions aligned.
+
+### Build
+
 ```bat
 build.bat
 ```
 
-That installs the dependencies plus PyInstaller and produces `dist\Reciproca\Reciproca.exe`.
+It prints the interpreter, Python version and Tk version it is about to use, then
+installs the dependencies plus PyInstaller and produces `dist\Reciproca\Reciproca.exe`.
+Check that banner first whenever a build misbehaves — a machine with more than one
+Python is the usual explanation.
+
 To build by hand instead: `pip install -r requirements.txt pyinstaller` then
-`pyinstaller reciproca.spec`.
+`pyinstaller reciproca.spec`. Delete `build\` first if you have upgraded anything:
+PyInstaller caches its analysis there, and a stale cache silently undoes the upgrade.
 
 This is a **one-folder** build: keep everything inside `dist\Reciproca\` together —
 the executable needs the files next to it. Copy that whole folder wherever you like.
