@@ -20,3 +20,7 @@ follow_logs_*.txt
 # Instagram data exports the user supplies locally
 followers.json
 following.json
+
+# PyInstaller build output (reciproca.spec itself is tracked)
+build/
+dist/

@@ -48,6 +48,38 @@ All locale strings live in one block at the top of `reciproca.py`
 `CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a language means editing
 that block only — no call site needs to change.
 
+## Building a standalone Windows executable
+
+PyInstaller cannot cross-compile, so a Windows `.exe` has to be built **on Windows**.
+
+```bat
+build.bat
+```
+
+That installs the dependencies plus PyInstaller and produces `dist\Reciproca\Reciproca.exe`.
+To build by hand instead: `pip install -r requirements.txt pyinstaller` then
+`pyinstaller reciproca.spec`.
+
+This is a **one-folder** build: keep everything inside `dist\Reciproca\` together —
+the executable needs the files next to it. Copy that whole folder wherever you like.
+
+Notes:
+
+- **Put it somewhere writable.** The app stores its queue, follow history, settings,
+  Chrome login profile and logs *next to the executable*, so `Program Files` is a
+  poor choice. A folder under your user directory works well.
+- **First run needs internet.** `webdriver-manager` downloads the ChromeDriver
+  matching your installed Chrome. Afterwards it is cached.
+- **Antivirus.** PyInstaller output is sometimes flagged as a false positive. The
+  one-folder build trips this far less often than a one-file build.
+- **Debugging a build that won't start.** Set `console=False` to `True` in
+  `reciproca.spec` and rebuild to get a console window showing the traceback.
+  Errors while opening the browser are also written in full to `follow_bot.log`
+  next to the executable, so you can diagnose without rebuilding.
+- **A `RequestsDependencyWarning` at startup is harmless** — it means the build
+  machine has `urllib3`/`charset_normalizer` versions `requests` doesn't
+  recognise. It does not affect the app.
+
 ## Generated files (git-ignored)
 
 `chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.

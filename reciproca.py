@@ -9,6 +9,7 @@ import logging
 import functools
 import os
 import re
+import sys
 import threading
 import time
 import random
@@ -19,11 +20,9 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 from selenium import webdriver
 from selenium.common.exceptions import (
-    ElementNotInteractableException,
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
-    WebDriverException,
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -65,14 +64,42 @@ CONFIG = {
     "UNFOLLOW_DAILY_LIMIT": 20,             # Soft daily target for unfollows
 }
 
+# ---------------------------
+# APPLICATION PATHS
+# ---------------------------
+def app_dir():
+    """Directory the app reads and writes its own files in.
+
+    Never use the current working directory for this. Running from a PyInstaller
+    build, the CWD is wherever the user launched from - a desktop shortcut or the
+    Start menu points it somewhere unrelated, and the queue, follow history, saved
+    login profile and config would silently be created there instead, looking to
+    the user like the app lost its data.
+
+    Frozen builds anchor to the folder holding the executable; running from source
+    anchors to the folder holding this file. Both give a stable location that
+    matches where the user thinks the app lives.
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def data_path(filename):
+    """Absolute path for one of the app's own files, next to the app itself."""
+    return os.path.join(app_dir(), filename)
+
+
 # Files for persistence
-QUEUE_FILE = "follow_queue.json"
-FOLLOWED_FILE = "followed_history.json"
-FREQUENCIES_FILE = "user_frequencies.json"
-HASHTAGS_FILE = "hashtags.json"
-CONFIG_FILE = "bot_config.json"
-UNFOLLOW_PROGRESS_FILE = "unfollow_progress.json"
-UNFOLLOW_SESSION_FILE = "unfollow_last_session.json"
+QUEUE_FILE = data_path("follow_queue.json")
+FOLLOWED_FILE = data_path("followed_history.json")
+FREQUENCIES_FILE = data_path("user_frequencies.json")
+HASHTAGS_FILE = data_path("hashtags.json")
+CONFIG_FILE = data_path("bot_config.json")
+UNFOLLOW_PROGRESS_FILE = data_path("unfollow_progress.json")
+UNFOLLOW_SESSION_FILE = data_path("unfollow_last_session.json")
+LOG_FILE = data_path("follow_bot.log")
+CHROME_PROFILE_DIR = data_path("chrome_profile")
 
 # ---------------------------
 # INSTAGRAM UI TEXT MARKERS
@@ -558,7 +585,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("follow_bot.log"),
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -805,6 +832,19 @@ def wait_for_clickable(driver, by, value, timeout=CONFIG["BROWSER_TIMEOUT"]):
     wait = WebDriverWait(driver, timeout)
     return wait.until(EC.element_to_be_clickable((by, value)))
 
+def start_browser():
+    """Open the browser on a worker thread.
+
+    ChromeDriverManager().install() can download a driver, which takes long enough
+    to freeze the GUI if it runs on the Tk callback thread - the window stops
+    repainting and the app looks hung.
+    """
+    browser_btn.config(state='disabled')
+    thread = threading.Thread(target=open_browser, daemon=True)
+    thread.start()
+    active_threads.append(thread)
+
+
 def open_browser():
     """Open Chrome browser with persistent profile."""
     global driver
@@ -813,8 +853,7 @@ def open_browser():
         log("🌐 Initializing Chrome...", 'info')
 
         options = webdriver.ChromeOptions()
-        profile_path = os.path.abspath("chrome_profile")
-        options.add_argument(f"--user-data-dir={profile_path}")
+        options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
         options.add_argument("--profile-directory=Default")
         options.add_argument("--start-maximized")
 
@@ -839,9 +878,19 @@ def open_browser():
         browser_btn.config(state='disabled')
         update_unfollow_ui_state()
 
-    except WebDriverException as e:
-        log(f"❌ Browser error: {e}", 'error')
-        messagebox.showerror("Browser Error", str(e))
+    except Exception as e:
+        # Deliberately broad. A frozen build has no console, so anything not caught
+        # here vanishes silently and the log just stops after "Initializing Chrome"
+        # with no indication of why. Record the full traceback in follow_bot.log,
+        # which sits next to the executable, and surface the error in the GUI.
+        logger.exception("Failed to open browser")
+        log(f"❌ Browser error: {type(e).__name__}: {e}", 'error')
+        log("   Full traceback written to follow_bot.log", 'error')
+        messagebox.showerror(
+            "Browser Error",
+            f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details."
+        )
+        browser_btn.config(state='normal')
 
 def stop_bot():
     """Request graceful stop."""
@@ -2509,8 +2558,8 @@ def add_scraped_to_queue():
 def export_logs():
     """Export logs to file."""
     try:
-        filename = f"follow_logs_{datetime.now():%Y%m%d_%H%M%S}.txt"
-        with open(filename, 'w') as f:
+        filename = data_path(f"follow_logs_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        with open(filename, 'w', encoding='utf-8') as f:
             f.write(log_box.get(1.0, tk.END))
         log(f"Logs exported to {filename}", 'success')
         messagebox.showinfo("Exported", f"Logs saved to:\n{filename}")
@@ -2752,7 +2801,7 @@ def setup_gui():
     browser_btn = ttk.Button(
         control_frame,
         text='🌐 Open Browser',
-        command=open_browser,
+        command=start_browser,
         width=20
     )
     browser_btn.pack(side='left', padx=5)
