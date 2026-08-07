@@ -180,6 +180,23 @@ def is_follow_button(text):
     return has_marker(text, FOLLOW_BUTTON_MARKERS) and not has_marker(text, FOLLOWING_BUTTON_MARKERS)
 
 
+def parse_follower_count(text):
+    """First token in `text` that looks like a follower count, or None.
+
+    The count sits next to the followers link, but the surrounding text also
+    carries the profile's display name, so the first token is not reliably the
+    number - a name starting with an emoji would be logged as the count.
+
+    Accepts the shapes Instagram actually renders: plain digits, thousands
+    separated by either , or . depending on locale, and abbreviations such as
+    12.3K, 1,2K, 5M. Purely cosmetic: only used to label a log line.
+    """
+    for token in (text or "").split():
+        if re.fullmatch(r'\d[\d.,]*[KkMmBb]?', token):
+            return token
+    return None
+
+
 # ---------------------------
 # FOLLOWERS-DIALOG EXTRACTION SCRIPT
 # ---------------------------
@@ -1108,10 +1125,13 @@ def open_followers_popup():
             # Try to extract follower count for logging
             try:
                 parent = followers_link.find_element(By.XPATH, "..")
-                count_text = parent.text.split()[0].replace(",", "")
-                log(f"👥 Opening followers popup ({count_text} followers)...")
-            except:
-                log(f"👥 Opening followers popup...")
+                count_text = parse_follower_count(parent.text)
+                if count_text:
+                    log(f"👥 Opening followers popup ({count_text} followers)...")
+                else:
+                    log("👥 Opening followers popup...")
+            except Exception:
+                log("👥 Opening followers popup...")
 
             driver.execute_script("arguments[0].click();", followers_link)
 
