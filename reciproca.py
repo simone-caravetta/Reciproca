@@ -2718,19 +2718,27 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     username = profile_url.rstrip("/").split("/")[-1]
 
-                    if username in visited_authors or username in deferred_authors:
-                        # An author usually has several posts under one hashtag, so
-                        # working along the grid runs into them again. Not a repeated
-                        # post - those are filtered out before this loop - but
-                        # another post by an author this hashtag has already settled.
-                        log(f"⏭️ Skip author {username}, already handled - moving on to the next post")
+                    if username in visited_authors:
+                        # Authors have several posts under one hashtag, so working
+                        # along the grid runs into them again. Not a repeated post -
+                        # those are filtered out before this loop.
+                        log(f"⏭️ Skip author {username}, already scraped this run - moving on")
                         close_post()
                         continue
 
                     if username in author_history:
-                        # Scraped in an earlier session. Hold it back and move on
-                        # to the next post: this is what stops every run on the
-                        # same hashtag from returning the same candidates.
+                        # Scraped in an earlier session. Hold it back and move on to
+                        # the next post: this is what stops every run on the same
+                        # hashtag from returning the same candidates. Holding one back
+                        # twice costs nothing, so a later post of theirs needs no
+                        # separate case.
+                        #
+                        # Checked after visited_authors, and that order carries
+                        # weight: scrape_author() records the author in the history
+                        # straight away, so one scraped moments ago matches here too.
+                        # Were this branch first, it would offer that author back to
+                        # the fallback, which would open their followers popup a
+                        # second time in the same run.
                         deferred_authors[username] = profile_url
                         log(f"⏳ Already scraped {username} before, moving on to the next post")
                         close_post()
