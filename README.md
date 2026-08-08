@@ -7,12 +7,12 @@ Instagram account and **managing** the follow relationships they produce.
 
 Everything runs on your own machine: no account to create, no API key, no third-party
 service in the middle. You log into Instagram yourself, in an ordinary Chrome window
-the tool drives, and the session stays in a browser profile next to the app — your
+the tool drives, and the session stays in a browser profile next to the app. Your
 password is never typed into Reciproca and never leaves your computer.
 
 The approach is reciprocal growth. Reciproca looks for accounts that already follow
-several people posting under your hashtags — a sign they follow within your niche and
-might follow back — ranks candidates by how strong that signal is, and works down the
+several people posting under your hashtags, a sign they follow within your niche and
+might follow back. It ranks candidates by how strong that signal is and works down the
 list at a deliberately human pace. Managing the other half is the **Unfollow** tab: it
 reads your Instagram data export and clears the accounts that never reciprocated.
 
@@ -29,7 +29,7 @@ in some cases the account could end up restricted.
 
 It is a project for tinkering with browser automation and seeing how far careful
 pacing gets you, so try it for fun on an account you would not mind losing, on your
-own content and your own audience. The defaults are deliberately slow — leaving them
+own content and your own audience. The defaults are deliberately slow. Leaving them
 alone, or making them slower, keeps the whole thing closer to what somebody could
 plausibly do by hand, which is the point.
 
@@ -51,7 +51,7 @@ ChromeDriver on first run.
 3. Set the delays and the session limit, then **Start Following**.
 
 Candidates are ranked by how many of the scanned hashtag authors they already
-follow — a score that adds up across sessions — and followed from the top of that
+follow, a score that adds up across sessions. Following starts from the top of that
 list. Profiles that look automated (nothing posted, almost no followers, following
 thousands) are skipped and dropped from the queue; the thresholds are under
 **Settings → 🤖 Bot Filter**.
@@ -99,7 +99,7 @@ This produces `dist\Reciproca\Reciproca.exe`.
   `build.bat` prints the Python and Tk versions first: **Tk must read 8.6**. With
   Tk 9.0 the build succeeds and then crashes at startup.
 - Keep everything inside `dist\Reciproca\` together, and put the folder somewhere
-  **writable** — the queue, history, settings, login profile and logs are stored
+  **writable**: the queue, history, settings, login profile and logs are stored
   next to the executable.
 - Delete `build\` after upgrading anything: PyInstaller caches its analysis there.
 
@@ -116,7 +116,7 @@ that one JS test, not to run the app.
 ## Generated files (git-ignored)
 
 `chrome_profile/` and the app's own JSON state and logs, all written next to the
-app — see `.gitignore`.
+app. See `.gitignore`.
 
 ## License
 
