@@ -25,14 +25,31 @@ Requires Google Chrome to be installed: `webdriver-manager` automatically downlo
 
 ### Follow
 1. **Auto Follow** tab → **Open Browser**, then log into Instagram manually.
-2. Pick the mode: **Follow from Queue** (follows users already queued) or **Deep Search** (finds new users via hashtags and adds them to the queue).
+2. Pick the mode: **Deep Search** (finds new users via hashtags and adds them to the queue, selected by default) or **Follow from Queue** (follows users already queued).
 3. Set delay min/max and the follow limit for the session, then **Start Following**.
 
 ### Unfollow
 1. In Instagram: **Settings → Privacy and security → Download your data**, request the export in JSON format and download `followers_1.json` (or similar) and `following.json`.
-2. **Auto Follow** tab → **Open Browser** (if not already open) and log in.
-3. **🚫 Unfollow** tab → **Carica JSON**, select the two files. The tool automatically computes who you follow that doesn't follow you back.
-4. Set delay min/max and the session limit, then **Start Unfollow**. Progress is saved to `unfollow_progress.json`, so you can stop and resume in later sessions without starting over.
+2. **🚫 Unfollow** tab → **Open Browser** (if not already open) and log in. There is one browser shared with the Follow tab, so either tab's button opens the same one.
+3. **Load JSON**, select the two files. The tool automatically computes who you follow that doesn't follow you back.
+4. Set delay min/max and the session limit, then **Start Unfollow**. Progress is saved to `unfollow_progress.json`, so you can stop and resume in later sessions without starting over — the tab shows how much is left and how much is already done from the moment you open the app.
+
+When the list runs out, request a fresh export and load it: progress is kept as long as the browser is logged into the same account. Log into a different one and Reciproca sets that record aside under the previous account and picks up the new account's own — switching back restores it. **Reset** discards the current account's record on purpose, and says what it is about to delete before doing it.
+
+### Bot filter
+
+Profiles that will not reciprocate — nothing posted, almost no followers, following
+thousands — are rejected before being followed and dropped from the queue. The
+thresholds are in **Settings → 🤖 Bot Filter**; set `BOT_FILTER_ENABLED` to 0 to turn
+the check off.
+
+The counts live on the profile page and not in the followers list a candidate is
+found in, so the check runs at follow time, where the browser is already on the
+profile and it costs nothing extra. It therefore does not keep bots out of the
+queue — it stops them being followed. A profile whose counts cannot be read is
+followed anyway, with a warning in the log, so a change in Instagram's markup cannot
+quietly block every follow — and if only one count is unreadable the log says which,
+since that check alone stops happening.
 
 ### Coming Soon...
 - Semantic ranking of users during the Deep Search phase, powered by AI
@@ -45,8 +62,9 @@ match button and warning text per locale. **Currently supported: English and Ita
 
 All locale strings live in one block at the top of `reciproca.py`
 (`FOLLOWING_BUTTON_MARKERS`, `FOLLOW_BUTTON_MARKERS`, `UNFOLLOW_CONFIRM_MARKERS`,
-`CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a language means editing
-that block only — no call site needs to change.
+`POSTS_LABEL_MARKERS`, `FOLLOWERS_LABEL_MARKERS`, `FOLLOWING_LABEL_MARKERS`,
+`CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a
+language means editing that block only — no call site needs to change.
 
 ## Building a standalone Windows executable
 
@@ -107,6 +125,14 @@ Notes:
 
 ## Tests
 
+The Python tests cover the queue's ranking, the rotation of scraped authors, the
+bot filter's parsing and verdict, and the browser-state handling. They need no
+browser and no extra packages:
+
+```bash
+python -m unittest discover -s tests -t tests
+```
+
 `tests/test_extraction.js` checks the followers-dialog extraction: that each row's
 follow button is matched to the right user, so accounts you already follow are
 excluded. It reads the script straight out of `reciproca.py`, so it cannot drift
@@ -117,11 +143,11 @@ npm install jsdom
 node tests/test_extraction.js
 ```
 
-Node and jsdom are only needed for this test, not to run the app.
+Node and jsdom are only needed for that one test, not to run the app.
 
 ## Generated files (git-ignored)
 
-`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.
+`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `scraped_authors.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json` (plus one `unfollow_progress_<account>.json` per account you have switched away from), `unfollow_last_session.json`, and various logs — see `.gitignore`.
 
 ## License
 

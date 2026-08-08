@@ -23,6 +23,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -36,7 +37,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 CONFIG = {
     # Extraction settings - CONSERVATIVE for background operation
     "TARGET_AUTHORS_PER_HASHTAG": 10,      # Low: Prevents detection from rapid profile switching
-    "MAX_SCROLLS": 3,                       # Low: Limits scroll actions per hashtag
+    "MAX_SCROLLS_PER_HASHTAG": 30,          # Safety ceiling, not a budget - see the loop
     "FOLLOWER_SCROLL_COUNT": 20,            # Low: Shorter scrolls = less time per profile = lower risk
     "AUTHORS_BEFORE_COOLDOWN": 2,           # Very frequent cooldowns
     "COOLDOWN_DURATION": 15,                # 15 seconds between author groups
@@ -57,6 +58,13 @@ CONFIG = {
     "RETRY_ATTEMPTS": 2,                    # Fewer retries = less aggressive
     "RETRY_BACKOFF": 3,                     # Longer backoff between retries
     "EXTRACTION_PAUSE_DURATION": 2,         # Hours between extraction sessions
+
+    # Bot filtering - checked on the profile, right before following it
+    "BOT_FILTER_ENABLED": 1,                # 0 turns the whole check off
+    "BOT_MIN_POSTS": 1,                     # An empty gallery is the strongest signal
+    "BOT_MIN_FOLLOWERS": 10,
+    "BOT_MAX_FOLLOWING": 3000,
+    "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
 
     # Unfollow delays - same conservative philosophy as follow
     "UNFOLLOW_DELAY_MIN": 15,               # Minimum seconds between unfollows
@@ -94,6 +102,7 @@ def data_path(filename):
 QUEUE_FILE = data_path("follow_queue.json")
 FOLLOWED_FILE = data_path("followed_history.json")
 FREQUENCIES_FILE = data_path("user_frequencies.json")
+AUTHORS_FILE = data_path("scraped_authors.json")
 HASHTAGS_FILE = data_path("hashtags.json")
 CONFIG_FILE = data_path("bot_config.json")
 UNFOLLOW_PROGRESS_FILE = data_path("unfollow_progress.json")
@@ -142,6 +151,22 @@ UNFOLLOW_CONFIRM_MARKERS = (
     "non seguire", "smetti",    # IT
 )
 
+# The words beside the three counts in a profile header. The follower and following
+# counts are normally found by their links, but those links are not guaranteed to be
+# there, so reading the header text is the fallback for all three.
+#
+# Longest first: Italian uses "follower" for any number, so the English plural has to
+# be tried before the form that is also a prefix of it.
+POSTS_LABEL_MARKERS = (
+    "post",                     # EN "posts" / IT "post"
+)
+FOLLOWERS_LABEL_MARKERS = (
+    "followers", "follower",    # EN / IT
+)
+FOLLOWING_LABEL_MARKERS = (
+    "following", "seguiti",     # EN / IT
+)
+
 # Labels on a post dialog's close button. Matched via XPath contains(), which is
 # case-sensitive, so these keep their original capitalization.
 CLOSE_BUTTON_LABELS = ("Close", "Chiudi")
@@ -178,6 +203,96 @@ def is_follow_button(text):
     very button it is meant to rule out.
     """
     return has_marker(text, FOLLOW_BUTTON_MARKERS) and not has_marker(text, FOLLOWING_BUTTON_MARKERS)
+
+
+def parse_count(text):
+    """A count out of Instagram's profile header as a number, or None.
+
+    Accepts the shapes Instagram renders: plain digits, thousands separated by
+    either , or . depending on locale, and abbreviations such as 12.3K, 1,2K, 5M.
+
+    A separator means a decimal point only when a multiplier follows it, which is
+    what tells "1.234" (one thousand two hundred and thirty four) from "1.2K"
+    (one thousand two hundred).
+    """
+    if not text:
+        return None
+
+    # Some locales separate thousands with a space, so "1 234" has to read as 1234
+    # and not as 1. Getting that wrong understates a count, which is the direction
+    # that matters: it would reject a real account rather than let one through.
+    text = re.sub(r'(?<=\d)[\s  ](?=\d)', '', str(text))
+
+    match = re.search(r'(\d[\d.,]*)\s*([KkMmBb])?', text)
+    if not match:
+        return None
+
+    digits = match.group(1).rstrip('.,')
+    multiplier = match.group(2)
+
+    if multiplier:
+        try:
+            value = float(digits.replace(',', '.'))
+        except ValueError:
+            return None
+        return int(value * {'k': 1_000, 'm': 1_000_000, 'b': 1_000_000_000}[multiplier.lower()])
+
+    digits = digits.replace('.', '').replace(',', '')
+    return int(digits) if digits.isdigit() else None
+
+
+def bot_rejection_reason(posts, followers, following):
+    """Why a profile looks automated, as a phrase for the log, or None to allow it.
+
+    An account with nothing posted, almost nobody following it, or following
+    thousands while followed by few, is not going to reciprocate a follow.
+
+    Any count that could not be read arrives as None and takes no part in the
+    decision. A missing signal must never count as a bad one: Instagram changes
+    its markup regularly, and a reading that quietly fails has to let everyone
+    through rather than reject everyone.
+    """
+    if posts is not None and posts < CONFIG["BOT_MIN_POSTS"]:
+        return f"{posts} posts"
+
+    if followers is not None and followers < CONFIG["BOT_MIN_FOLLOWERS"]:
+        return f"only {followers} followers"
+
+    if following is not None and following > CONFIG["BOT_MAX_FOLLOWING"]:
+        return f"follows {following} accounts"
+
+    if (followers is not None and following is not None
+            and following > followers * CONFIG["BOT_MAX_FOLLOWING_RATIO"]):
+        return f"follows {following} but has {followers} followers"
+
+    return None
+
+
+# What can appear inside a rendered count: digits, a thousands separator (either ,
+# or . by locale, or a space in some), and nothing else. Letters are excluded on
+# purpose, so a search for one count's label can never reach across another count.
+COUNT_CHARS = r'[\d.,   ]'
+
+
+def parse_labelled_count(header_text, markers):
+    """The count beside one of `markers` in a profile header's text, or None.
+
+    Found by the word next to it rather than by position: the header carries all
+    three counts plus the display name and the bio, so none of them is reliably the
+    first number in it. Instagram renders each count and its label as separate
+    elements, so what sits between them is usually a newline.
+    """
+    for marker in markers:
+        match = re.search(
+            r'(\d' + COUNT_CHARS + r'*[KkMmBb]?)\s*' + re.escape(marker),
+            header_text or "",
+            re.IGNORECASE,
+        )
+        if match:
+            value = parse_count(match.group(1))
+            if value is not None:
+                return value
+    return None
 
 
 def parse_follower_count(text):
@@ -297,6 +412,54 @@ dialog.querySelectorAll('a[href^="/"]').forEach(link => {
 return {kept, skippedFollowing, rowsWithoutButton, rowsInspected};
 """
 
+# Every post link currently on a hashtag page, as the href attribute reads in the
+# DOM. Collected in one call rather than one round trip per element: a scrolled
+# hashtag page holds hundreds of them, and the values are also how each post is
+# found again right before it is clicked, which keeps element references from
+# going stale while post dialogs open and close.
+POST_LINKS_JS = """
+const hrefs = [];
+const seen = new Set();
+document.querySelectorAll("a[href*='/p/']").forEach(a => {
+    const href = a.getAttribute('href');
+    if (href && !seen.has(href)) {
+        seen.add(href);
+        hrefs.push(href);
+    }
+});
+return hrefs;
+"""
+
+# The three numbers in a profile header, read where the browser already is when a
+# follow is about to happen. Returns raw strings rather than numbers, so the
+# parsing - and every locale quirk in it - stays in Python where it is tested.
+#
+# The follower and following counts are found by their links, which are structural
+# and survive Instagram's redesigns better than any class name. Where the visible
+# text is abbreviated ("12.3K") the exact figure is usually in a title attribute
+# alongside it, so that is preferred. The post count has no link, so it is left to
+# a search of the header text.
+PROFILE_STATS_JS = """
+const header = document.querySelector('header');
+if (!header) return null;
+
+function read(link) {
+    if (!link) return null;
+    // The title may be on the link itself, which querySelector would not reach.
+    const titled = link.matches('[title]') ? link : link.querySelector('[title]');
+    const title = titled ? titled.getAttribute('title') : null;
+    return {title: title, text: link.innerText || link.textContent || ''};
+}
+
+// Matched loosely on purpose: the href is not always exactly "/user/followers/" -
+// it can carry a query string or lose its trailing slash.
+return {
+    headerText: header.innerText || header.textContent || '',
+    followers: read(header.querySelector('a[href*="/followers"]')),
+    following: read(header.querySelector('a[href*="/following"]')),
+};
+"""
+
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -304,7 +467,7 @@ def load_config():
     """Load config from file, fall back to defaults if not found."""
     default_config = {
         "TARGET_AUTHORS_PER_HASHTAG": 10,
-        "MAX_SCROLLS": 3,
+        "MAX_SCROLLS_PER_HASHTAG": 30,
         "FOLLOWER_SCROLL_COUNT": 20,
         "AUTHORS_BEFORE_COOLDOWN": 2,
         "COOLDOWN_DURATION": 15,
@@ -319,6 +482,11 @@ def load_config():
         "RETRY_ATTEMPTS": 2,
         "RETRY_BACKOFF": 3,
         "EXTRACTION_PAUSE_DURATION": 2,
+        "BOT_FILTER_ENABLED": 1,
+        "BOT_MIN_POSTS": 1,
+        "BOT_MIN_FOLLOWERS": 10,
+        "BOT_MAX_FOLLOWING": 3000,
+        "BOT_MAX_FOLLOWING_RATIO": 5,
         "UNFOLLOW_DELAY_MIN": 15,
         "UNFOLLOW_DELAY_MAX": 30,
         "UNFOLLOW_DAILY_LIMIT": 20,
@@ -402,19 +570,64 @@ def save_queue(queue):
         logger.error(f"Error saving queue: {e}")
         return False
 
+def queue_username(item):
+    """Username of a queue entry, whichever format it is stored in.
+
+    Entries are dicts carrying metadata, but queues written by older versions are
+    plain username strings. One accessor instead of an isinstance check at every
+    call site.
+    """
+    if isinstance(item, dict):
+        return item.get('username')
+    return item
+
+
+def ranking_frequencies():
+    """Frequencies the queue is ranked by, read from disk on first use.
+
+    A user's frequency is how many of the scanned hashtag authors that user
+    follows: a frequency of 6 means this candidate already follows 6 accounts
+    posting under the searched tags, which is why it predicts a follow back.
+    The count accumulates across scraping sessions, so it is a property of the
+    candidate and not of the session that happened to find them.
+    """
+    global last_scrape_frequencies
+    if not last_scrape_frequencies:
+        last_scrape_frequencies = load_frequencies()
+    return last_scrape_frequencies
+
+
+def rank_queue(queue, frequencies=None):
+    """Queue entries ordered by rank, highest first.
+
+    Returns a list of (username, rank, item) triples.
+
+    This is the single definition of the queue's order. The listbox draws it and
+    follow_from_queue consumes it, so the account followed next is always the
+    top one on screen. They used to order the queue separately - the display
+    sorted by rank while the follow loop walked the file in insertion order -
+    which made the ranking decorative: it was shown but never acted on.
+
+    Ties break on username so the order stays stable between redraws.
+    """
+    if frequencies is None:
+        frequencies = ranking_frequencies()
+
+    ranked = []
+    for item in queue:
+        username = queue_username(item)
+        if username:
+            ranked.append((username, frequencies.get(username, 0), item))
+
+    ranked.sort(key=lambda entry: (-entry[1], entry[0]))
+    return ranked
+
+
 def add_to_queue(usernames):
     """Add usernames to queue, avoiding duplicates and already followed users."""
     queue = load_queue()
     # Add only new usernames (not already in queue and not already followed)
-    existing_in_queue = set()
-
-    # Extract usernames from queue (handle both list and dict formats)
-    if queue and isinstance(queue[0], dict):
-        # New format with metadata
-        existing_in_queue = {item['username'] for item in queue if isinstance(item, dict) and 'username' in item}
-    else:
-        # Old format - just usernames
-        existing_in_queue = set(queue)
+    existing_in_queue = {queue_username(item) for item in queue}
 
     new_users = []
 
@@ -433,7 +646,10 @@ def add_to_queue(usernames):
         }
         queue.append(queue_item)
 
-    save_queue(queue)
+    # Persist in rank order, so the file matches what the listbox shows and the
+    # order the follow loop will consume. Plain appending buried a high-ranking
+    # user from this batch behind every lower-ranked user already queued.
+    save_queue([item for _, _, item in rank_queue(queue)])
     return len(new_users), len(queue)
 
 def remove_from_queue(username):
@@ -442,16 +658,7 @@ def remove_from_queue(username):
     if not queue:
         return False
 
-    # Handle both old format (list of usernames) and new format (list of dicts)
-    if queue and isinstance(queue[0], dict):
-        # New format
-        queue = [item for item in queue if item.get('username') != username]
-    else:
-        # Old format
-        if username in queue:
-            queue.remove(username)
-
-    save_queue(queue)
+    save_queue([item for item in queue if queue_username(item) != username])
     return True
 
 def clear_queue():
@@ -466,14 +673,11 @@ def validate_queue():
     if not queue:
         return 0, 0
 
-    # Handle both old format (list of usernames) and new format (list of dicts)
-    is_new_format = queue and isinstance(queue[0], dict)
-
     # Remove duplicates while preserving order
     seen = set()
     unique_queue = []
     for item in queue:
-        username = item['username'] if is_new_format else item
+        username = queue_username(item)
         if username not in seen:
             seen.add(username)
             unique_queue.append(item)
@@ -482,7 +686,7 @@ def validate_queue():
     validated_queue = []
     removed_count = 0
     for item in unique_queue:
-        username = item['username'] if is_new_format else item
+        username = queue_username(item)
         if is_already_followed(username):
             removed_count += 1
             logger.debug(f"Queue validation: Removed already followed user {username}")
@@ -546,6 +750,48 @@ def save_frequencies(frequencies):
     except Exception as e:
         logger.error(f"Error saving frequencies: {e}")
         return False
+
+def load_author_history():
+    """Authors whose followers have been scraped, mapped to when that last happened.
+
+    A hashtag page shows the same posts at the top session after session, so
+    without this the same handful of authors get scraped every time and the
+    candidates found never change.
+    """
+    try:
+        if os.path.exists(AUTHORS_FILE):
+            with open(AUTHORS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.error(f"Error loading author history: {e}")
+    return {}
+
+
+def save_author_history(history):
+    """Save the scraped-authors history."""
+    try:
+        with open(AUTHORS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving author history: {e}")
+        return False
+
+
+def order_authors_by_staleness(usernames, history):
+    """Authors ordered by who is most worth scraping next.
+
+    Never scraped comes first, always. The rest follow least recently scraped
+    first, so an author left alone for several sessions comes back up before one
+    used yesterday, and repeated runs on the same hashtags rotate through
+    different authors instead of always taking whoever the first posts belong to.
+
+    Timestamps are ISO 8601, which sorts chronologically as plain text.
+    """
+    return sorted(usernames, key=lambda u: (u in history, history.get(u) or "", u))
+
 
 def load_hashtags():
     """Load hashtags from file."""
@@ -636,6 +882,121 @@ def uf_save_progress():
     except Exception as e:
         logger.error(f"Error saving unfollow progress: {e}")
 
+def uf_load_session():
+    """The saved unfollow session: which export files, and whose account."""
+    try:
+        if os.path.exists(UNFOLLOW_SESSION_FILE):
+            with open(UNFOLLOW_SESSION_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.error(f"Error loading unfollow session: {e}")
+    return {}
+
+
+def uf_save_session(**changes):
+    """Update the saved unfollow session, leaving the other keys as they are."""
+    session = uf_load_session()
+    session.update(changes)
+    try:
+        with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving unfollow session: {e}")
+
+
+def current_account_id():
+    """Numeric id of the Instagram account logged into the browser, or None.
+
+    Read from the ds_user_id cookie rather than from the page: no navigation, no
+    markup to match, and nothing that shifts with Instagram's layout or language.
+
+    None means the question cannot be answered right now - no browser, not logged
+    in, or sitting on another domain - never that the account has changed.
+    """
+    if driver is None:
+        return None
+    try:
+        cookie = driver.get_cookie('ds_user_id')
+        return cookie.get('value') if cookie else None
+    except WebDriverException as e:
+        logger.info(f"Could not read the logged-in account: {type(e).__name__}")
+        return None
+
+
+def uf_progress_archive(account_id):
+    """Where one account's unfollow progress waits while another one is active.
+
+    The id comes from a cookie, so it is stripped to word characters before it
+    becomes part of a filename. Instagram's ids are digits; this only rules out a
+    malformed value reaching outside the app's own directory.
+    """
+    safe_id = re.sub(r'\W', '', str(account_id))
+    return data_path(f"unfollow_progress_{safe_id}.json")
+
+
+def uf_check_account():
+    """Keep the unfollow progress with the account it was recorded against.
+
+    The progress records who has already been processed from one account's
+    following list, which means nothing on another account's. Re-exporting the
+    JSON files for the same account has to keep it - that is the normal way to
+    carry on - while a different account has to start from its own.
+
+    Nothing is deleted. Each account's record is parked under its own name and
+    brought back if that account returns: this runs by itself, and an automatic
+    action should not be able to destroy history. Reset is the button for
+    discarding on purpose.
+
+    The loaded export is cleared, though - it describes the other account, so
+    every count drawn from it would be wrong.
+    """
+    global uf_followers, uf_following, uf_non_followers
+
+    account_id = current_account_id()
+    if account_id is None:
+        return
+
+    previous_id = uf_load_session().get("account_id")
+    if previous_id == account_id:
+        return
+
+    if previous_id is None:
+        # First run able to identify the account: adopt it, keep the progress.
+        uf_save_session(account_id=account_id)
+        logger.info(f"Unfollow progress now associated with account {account_id}")
+        return
+
+    try:
+        if os.path.exists(UNFOLLOW_PROGRESS_FILE):
+            os.replace(UNFOLLOW_PROGRESS_FILE, uf_progress_archive(previous_id))
+        returning = uf_progress_archive(account_id)
+        if os.path.exists(returning):
+            os.replace(returning, UNFOLLOW_PROGRESS_FILE)
+    except Exception as e:
+        logger.error(f"Error switching unfollow progress between accounts: {e}")
+
+    uf_followers = set()
+    uf_following = set()
+    uf_non_followers = []
+    uf_save_session(account_id=account_id, followers_file=None, following_file=None)
+    uf_load_progress()
+
+    already_removed = len(uf_progress.get("unfollowed", []))
+    log("👥 Different Instagram account detected - unfollow progress switched", 'warning')
+    update_unfollow_ui_state()
+    messagebox.showinfo(
+        "Account changed",
+        "The browser is logged into a different Instagram account than the one the "
+        "unfollow progress belongs to.\n\n"
+        "That progress has been set aside under the previous account and will come "
+        "back if you log into it again - nothing was deleted.\n\n"
+        f"This account's own progress is now active ({already_removed} already "
+        "unfollowed). Load its followers.json and following.json to continue."
+    )
+
+
 def uf_load_json_files():
     """Prompt user for followers.json/following.json and compute non-followers."""
     global uf_followers, uf_following, uf_non_followers
@@ -658,12 +1019,13 @@ def uf_load_json_files():
 
         log(f"✔ JSON files loaded: {len(uf_non_followers)} non-followers found", 'success')
 
-        with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"followers_file": f1, "following_file": f2}, f)
+        uf_save_session(
+            followers_file=f1,
+            following_file=f2,
+            account_id=current_account_id() or uf_load_session().get("account_id"),
+        )
 
-        uf_load_progress()
         update_unfollow_ui_state()
-        refresh_unfollow_display()
 
     except Exception as e:
         messagebox.showerror("Error", f"Invalid files:\n{e}")
@@ -677,8 +1039,7 @@ def uf_auto_load_last_session():
         return
 
     try:
-        with open(UNFOLLOW_SESSION_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = uf_load_session()
 
         f1 = data.get("followers_file")
         f2 = data.get("following_file")
@@ -691,8 +1052,13 @@ def uf_auto_load_last_session():
         uf_following = uf_load_following(f2)
         uf_non_followers = list(uf_following - uf_followers)
 
-        log(f"🔄 Unfollow session reloaded: {len(uf_non_followers)} non-followers", 'info')
         uf_load_progress()
+        total, remaining, removed = unfollow_progress_counts()
+        log(
+            f"🔄 Unfollow session reloaded: {total} non-followers, "
+            f"{remaining} still to process ({removed} already removed)",
+            'info'
+        )
         update_unfollow_ui_state()
 
     except Exception as e:
@@ -749,11 +1115,22 @@ class SessionStats:
 # Global state
 stats = SessionStats(on_update=lambda: update_stats_display())
 driver = None
+# Set while the browser is being opened. Both tabs have an Open Browser button,
+# and without this a click on each would start two Chrome instances.
+browser_opening = threading.Event()
+# Set while a follow or unfollow session owns the browser. Both drive the same
+# Selenium session and the same window, so only one may run at a time.
+session_running = threading.Event()
 stop_requested = threading.Event()
 active_threads = []
 # Live extraction tracking
 live_extracted_users = []  # Track users as they're extracted
 live_frequencies = Counter()  # Track frequencies in real-time
+# Frequencies the queue is ranked by. Read lazily via ranking_frequencies() so
+# startup does not touch the disk before the GUI exists.
+last_scrape_frequencies = None
+# Usernames currently drawn in the queue listbox, row by row
+displayed_queue_usernames = []
 
 # Unfollow state
 uf_stats = SessionStats(on_update=lambda: update_unfollow_stats_display())
@@ -956,8 +1333,17 @@ def start_browser():
     ChromeDriverManager().install() can download a driver, which takes long enough
     to freeze the GUI if it runs on the Tk callback thread - the window stops
     repainting and the app looks hung.
+
+    Reached from either tab's Open Browser button, so it has to be safe to call
+    when a browser is already open or on its way.
     """
-    browser_btn.config(state='disabled')
+    if driver is not None or browser_opening.is_set():
+        return
+
+    browser_opening.set()
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+
     thread = threading.Thread(target=open_browser, daemon=True)
     thread.start()
     active_threads.append(thread)
@@ -991,10 +1377,9 @@ def open_browser():
         driver.get("https://www.instagram.com/")
         log("✅ Browser opened! Please login manually.", 'success')
 
-        # Enable start button
-        start_btn.config(state='normal')
-        browser_btn.config(state='disabled')
-        update_unfollow_ui_state()
+        # The browser is the only place that knows which account is logged in, so
+        # this is the first chance to tell whether the loaded export still matches.
+        uf_check_account()
 
     except Exception as e:
         # Deliberately broad. A frozen build has no console, so anything not caught
@@ -1008,13 +1393,140 @@ def open_browser():
             "Browser Error",
             f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details."
         )
-        browser_btn.config(state='normal')
+    finally:
+        browser_opening.clear()
+        refresh_browser_state()
+
+# How often to check that the browser is still there, in milliseconds.
+BROWSER_WATCH_INTERVAL = 2000
+
+
+def browser_is_open():
+    """True if the browser is still there, asked of the browser itself.
+
+    The `driver` global is not evidence: closing the Chrome window leaves it
+    holding a dead session that looks perfectly valid until something tries to
+    use it.
+
+    Never call this from the GUI thread while a worker thread is driving the same
+    session - one Selenium session commanded from two threads interleaves badly.
+    """
+    if driver is None:
+        return False
+    try:
+        return bool(driver.window_handles)
+    except WebDriverException as e:
+        logger.info(f"Browser probe failed, treating the browser as closed: {type(e).__name__}")
+        return False
+
+
+def can_open_browser():
+    """True when clicking Open Browser would actually do something."""
+    return driver is None and not browser_opening.is_set()
+
+
+def begin_session():
+    """Claim the browser for one session, or refuse if another already has it.
+
+    Follow and unfollow drive the same Selenium session and the same window. Two
+    at once would interleave commands on one browser: each would navigate the page
+    out from under the other, and both would then act on whatever happened to be
+    loaded - unfollowing an account the follow session had just opened, or
+    following one the unfollow session was on.
+
+    Both tabs disable their Start buttons while a session runs; this is the guard
+    that does not depend on a button state being right. Called from the GUI thread
+    only, so the check and the claim cannot race.
+    """
+    if session_running.is_set():
+        log("⚠️ A session is already running - stop it before starting another", 'warning')
+        return False
+
+    session_running.set()
+    stop_requested.clear()
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+    return True
+
+
+def end_session():
+    """Release the browser when a session finishes and settle both tabs."""
+    session_running.clear()
+    refresh_browser_state()
+
+
+def update_follow_ui_state():
+    """Follow-tab buttons in agreement with the browser and any running session.
+
+    One place decides, so no exit path can leave Start Following enabled with no
+    browser behind it, or Open Browser disabled after the browser is gone - which
+    left the app stuck until it was restarted.
+    """
+    try:
+        running = session_running.is_set()
+        browser_btn.config(state='normal' if can_open_browser() else 'disabled')
+        start_btn.config(
+            state='normal' if driver is not None and not running else 'disabled'
+        )
+        stop_btn.config(state='normal' if running else 'disabled')
+    except Exception as e:
+        logger.debug(f"update_follow_ui_state error: {e}")
+
+
+def handle_browser_closed():
+    """Forget a browser that is gone and let the user open a new one."""
+    global driver
+
+    if driver is not None:
+        try:
+            driver.quit()  # Release chromedriver; the browser itself is already gone
+        except Exception as e:
+            logger.debug(f"Error quitting the closed browser: {e}")
+        driver = None
+        log("🌐 Browser closed - click 'Open Browser' to start a new session", 'warning')
+
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+
+
+def refresh_browser_state():
+    """Re-check the browser and bring both tabs' controls in line with it."""
+    if driver is not None and not browser_is_open():
+        handle_browser_closed()
+    else:
+        update_follow_ui_state()
+        update_unfollow_ui_state()
+
+
+def watch_browser():
+    """Notice the browser being closed, instead of waiting for something to fail.
+
+    Closing the Chrome window used to go unremarked: Start Following stayed
+    enabled while every click failed, and Open Browser stayed disabled, so there
+    was no way back without restarting the app.
+
+    Only probes while no worker thread is running, to keep two threads off the
+    same Selenium session. A browser closed mid-session is caught by the worker
+    failing, and by the check when the session finishes.
+    """
+    try:
+        active_threads[:] = [t for t in active_threads if t.is_alive()]
+        if driver is not None and not active_threads and not browser_is_open():
+            handle_browser_closed()
+    except Exception as e:
+        logger.debug(f"watch_browser error: {e}")
+    finally:
+        root.after(BROWSER_WATCH_INTERVAL, watch_browser)
+
 
 def stop_bot():
     """Request graceful stop."""
     stop_requested.set()
     log("⏹️ Stop requested, finishing current operation...", 'warning')
+    # Both tabs' Stop buttons come here, so both acknowledge the click. The session
+    # itself keeps running until it reaches a checkpoint.
     stop_btn.config(state='disabled')
+    uf_stop_btn.config(state='disabled')
 
     # Save any already extracted users to queue if scraping was in progress
     # Only do this if we're actually in extraction mode, not during follow
@@ -1022,17 +1534,18 @@ def stop_bot():
         # Check if we have live extraction data (indicating extraction was in progress)
         global live_extracted_users
         if live_extracted_users:
-            # Reload frequencies from file to get the latest incremental data
-            current_freqs = load_frequencies()
-            if current_freqs:
-                ranked_users = [u for u, _ in current_freqs.most_common()]
-                if ranked_users:
-                    new_count, total_count = add_to_queue(ranked_users)
-                    log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
-                    # Update global frequencies
-                    global last_scrape_frequencies
-                    last_scrape_frequencies = current_freqs
-                    refresh_queue_display()
+            # Only this session's finds, best first. The frequencies file accumulates
+            # across sessions, so ranking it whole would queue the entire history.
+            global last_scrape_frequencies
+            last_scrape_frequencies = load_frequencies()
+            ranked_users = [
+                username for username, _, _ in
+                rank_queue(list(dict.fromkeys(live_extracted_users)), last_scrape_frequencies)
+            ]
+            if ranked_users:
+                new_count, total_count = add_to_queue(ranked_users)
+                log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
+                refresh_queue_display()
         else:
             # If we're stopping during follow (not extraction), just validate the queue
             log("🔄 Validating queue consistency after stop...", 'info')
@@ -1684,6 +2197,83 @@ def find_follow_button():
         return None, "error"
 
 
+def read_profile_stats():
+    """(posts, followers, following) for the profile in the browser, None where unread.
+
+    Never raises. A profile whose numbers cannot be read has to stay followable.
+    """
+    try:
+        raw = driver.execute_script(PROFILE_STATS_JS)
+    except WebDriverException as e:
+        logger.info(f"Could not read profile stats: {type(e).__name__}")
+        return None, None, None
+
+    if not raw:
+        return None, None, None
+
+    header_text = raw.get('headerText') or ""
+
+    def from_link(entry):
+        if not entry:
+            return None
+        # The title attribute holds the exact figure where the text is abbreviated,
+        # so prefer it - but only when it parsed, and 0 is a value like any other.
+        from_title = parse_count(entry.get('title'))
+        return from_title if from_title is not None else parse_count(entry.get('text'))
+
+    # Two independent routes to each count, because one link that cannot be found
+    # used to mean that check simply did not happen.
+    followers = from_link(raw.get('followers'))
+    if followers is None:
+        followers = parse_labelled_count(header_text, FOLLOWERS_LABEL_MARKERS)
+
+    following = from_link(raw.get('following'))
+    if following is None:
+        following = parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS)
+
+    return (
+        parse_labelled_count(header_text, POSTS_LABEL_MARKERS),
+        followers,
+        following,
+    )
+
+
+def profile_bot_reason():
+    """Why the profile in the browser looks automated, or None to follow it."""
+    # The header shell can render before the counts arrive, so give them a moment
+    # rather than reading zeroes off a half-built page. Costs nothing when the
+    # numbers are already there, which is the normal case.
+    for attempt in range(3):
+        posts, followers, following = read_profile_stats()
+        if None not in (posts, followers, following):
+            break
+        if attempt < 2:
+            time.sleep(1)
+
+    missing = [
+        name for name, value in
+        (("posts", posts), ("followers", followers), ("following", following))
+        if value is None
+    ]
+
+    # Fail open - but never quietly. A count that cannot be read takes no part in the
+    # decision, so staying silent would look exactly like a profile that passed the
+    # check, and a partly unreadable header would disable part of the filter without
+    # anyone noticing. This is the only way to find out Instagram changed its markup.
+    if len(missing) == 3:
+        log("⚠️ Could not read any of this profile's counts - bot filter skipped", 'warning')
+        return None
+    if missing:
+        log(f"⚠️ Could not read {' or '.join(missing)} here - that check was skipped", 'warning')
+
+    reason = bot_rejection_reason(posts, followers, following)
+    logger.info(
+        f"Profile stats: posts={posts} followers={followers} "
+        f"following={following} -> {reason or 'ok'}"
+    )
+    return reason
+
+
 def follow_user(username, delay_min, delay_max):
     """Follow a single user with validation."""
     try:
@@ -1723,6 +2313,20 @@ def follow_user(username, delay_min, delay_max):
             return False, "button_error"
 
         if status == "follow" and btn:
+            # The counts only exist on the profile, and the browser is already on it,
+            # so this is the one place the check is free. It is a gate rather than a
+            # filter: by now the account is in the queue, and this is what stops it
+            # being followed.
+            #
+            # Checked here rather than on arrival so that a profile already followed,
+            # or one with no button to press, is settled as what it is - it needs no
+            # counts, and would otherwise be recorded as filtered instead.
+            if CONFIG["BOT_FILTER_ENABLED"]:
+                bot_reason = profile_bot_reason()
+                if bot_reason:
+                    log(f"🤖 Skip {username} | looks automated: {bot_reason}", 'warning')
+                    return False, "filtered_bot"
+
             # Store button reference for validation comparison
             original_btn = btn
 
@@ -1773,15 +2377,17 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
     skipped_already_followed = 0
     batch_count = 0
 
-    # Extract usernames from queue items (handle both formats)
-    usernames = []
-    for item in users_to_follow:
-        if isinstance(item, dict):
-            usernames.append(item['username'])
-        else:
-            usernames.append(item)
+    # Consume in rank order, highest first - the same order rank_queue() gives the
+    # listbox, so the next account followed is the top one on screen. Ranking here
+    # rather than at the call sites means neither queue mode nor deep search can
+    # bypass it.
+    ranked = rank_queue(users_to_follow)
+    usernames = [username for username, _, _ in ranked]
 
     log(f"📋 Following from queue: {len(usernames)} users available")
+    if ranked:
+        preview = ", ".join(f"{u} [{rank}]" for u, rank, _ in ranked[:10])
+        log(f"🏆 Follow order by rank: {preview}{' ...' if len(ranked) > 10 else ''}", 'info')
     log(f"🎯 Target: {limit} follows this session")
     log(f"🛡️ Safety: {CONFIG['FOLLOW_BATCH_SIZE']} follows per batch, {CONFIG['FOLLOW_BATCH_COOLDOWN']//60}min cooldown between batches")
 
@@ -1840,6 +2446,13 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
                 log(f"⚠️ Skip {user} | already following", 'warning')
                 remove_from_queue(user)  # Remove since already following
                 log_followed_user(user, "already_following")
+            elif reason == "filtered_bot":
+                # follow_user already logged which signal rejected it. Recorded in the
+                # history so the queue drops it and later extractions do not re-add it:
+                # the verdict would not change on a second visit, and re-checking would
+                # cost another profile load every session.
+                remove_from_queue(user)
+                log_followed_user(user, "filtered_bot")
             else:
                 log(f"⚠️ Skip {user} | {reason}", 'warning')
                 # Don't remove from queue on error - can retry next time
@@ -1994,10 +2607,16 @@ def unfollow_logic():
             messagebox.showerror("Error", "Please enter valid numbers")
             return
 
-        if driver is None:
+        if not browser_is_open():
             log("❌ Browser not open!", 'error')
-            messagebox.showerror("Error", "Please open the browser first (Auto Follow tab)")
+            handle_browser_closed()
+            messagebox.showerror("Error", "Please open the browser first")
             return
+
+        # The account may have been switched in the browser since the files were
+        # loaded, which would make this session write progress against the wrong
+        # following list.
+        uf_check_account()
 
         if not uf_non_followers:
             log("❌ No data loaded! Load followers.json and following.json first", 'error')
@@ -2014,9 +2633,6 @@ def unfollow_logic():
 
         log(f"🚀 Starting UNFOLLOW: {len(to_process)} users left to process")
 
-        uf_start_btn.config(state='disabled')
-        uf_stop_btn.config(state='normal')
-        start_btn.config(state='disabled')  # Prevent concurrent follow session on same driver
         reset_unfollow_progress()
 
         random.shuffle(to_process)
@@ -2031,69 +2647,118 @@ def unfollow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in unfollow_logic")
     finally:
-        uf_start_btn.config(state='normal')
-        uf_stop_btn.config(state='disabled')
-        start_btn.config(state='normal')
-        refresh_unfollow_display()
+        # Releases the browser for the next session, re-checks it in case it was
+        # closed while this ran, and refreshes the summary counts.
+        end_session()
         if not stop_requested.is_set():
             reset_unfollow_progress()
 
 
 def run_unfollow():
     """Start unfollow in background thread."""
+    if not begin_session():
+        return
     thread = threading.Thread(target=unfollow_logic, daemon=True)
     thread.start()
     active_threads.append(thread)
 
 
+def unfollow_progress_counts():
+    """(total, remaining, removed) for the loaded non-followers list.
+
+    Read from the saved progress, so it survives restarts: the work already done
+    in earlier sessions is the whole point of keeping that file.
+    """
+    processed = set(uf_progress.get("processed", []))
+    remaining = sum(1 for u in uf_non_followers if u not in processed)
+    return len(uf_non_followers), remaining, len(uf_progress.get("unfollowed", []))
+
+
 def update_unfollow_ui_state():
-    """Enable/disable the unfollow Start button based on browser + data readiness."""
+    """Unfollow tab's Start button and summary, in agreement with what is loaded.
+
+    One place owns that label. A second function used to write a fuller version of
+    it, but nothing called that at startup, so a reloaded session showed only its
+    total - how much of the list had already been done stayed hidden until a round
+    finished or Stop was pressed.
+    """
     try:
-        ready = driver is not None and (len(uf_non_followers) > 0 or os.path.exists(UNFOLLOW_PROGRESS_FILE))
-        uf_start_btn.config(state='normal' if ready else 'disabled')
-        if ready:
-            uf_data_label.config(text=f"🟢 {len(uf_non_followers)} non-followers ready")
-        else:
-            uf_data_label.config(text="🟡 Open the browser and load the JSON files")
+        uf_load_progress()
+        running = session_running.is_set()
+        uf_browser_btn.config(state='normal' if can_open_browser() else 'disabled')
+        uf_start_btn.config(
+            state='normal'
+            if driver is not None and uf_non_followers and not running
+            else 'disabled'
+        )
+        uf_stop_btn.config(state='normal' if running else 'disabled')
+
+        if not uf_non_followers:
+            uf_data_label.config(text="🟡 Load followers.json and following.json to begin")
+            return
+
+        total, remaining, removed = unfollow_progress_counts()
+        summary = f"🟢 {total} non-followers | {remaining} to process | {removed} already removed"
+        if driver is None:
+            # The counts are worth seeing before the browser is open; say why Start
+            # is not available rather than hiding them behind that instruction.
+            summary += " | open the browser to start"
+        uf_data_label.config(text=summary)
     except Exception as e:
         logger.debug(f"update_unfollow_ui_state error: {e}")
 
 
-def refresh_unfollow_display():
-    """Refresh the unfollow tab's summary info."""
-    try:
-        uf_load_progress()
-        remaining = len([u for u in uf_non_followers if u not in uf_progress.get("processed", [])])
-        uf_data_label.config(
-            text=f"🟢 {len(uf_non_followers)} non-followers | {remaining} to process | "
-                 f"{len(uf_progress.get('unfollowed', []))} already removed"
-        )
-    except Exception as e:
-        logger.debug(f"refresh_unfollow_display error: {e}")
-
-
 def reset_unfollow_app():
-    """Reset unfollow progress/session (does not touch follow queue/history)."""
+    """Discard the unfollow progress and session (leaves the follow queue alone).
+
+    Unlike the automatic account switch, this throws the record away for good, so
+    it says exactly what is about to be lost and what is not. Everyone already
+    unfollowed on Instagram stays unfollowed - only the app's memory of it goes,
+    which means those accounts can be processed again if they turn up in a future
+    export.
+    """
     global uf_followers, uf_following, uf_non_followers, uf_progress
 
-    if messagebox.askyesno("Confirm", "Reset unfollow progress and session?"):
-        if os.path.exists(UNFOLLOW_PROGRESS_FILE):
-            os.remove(UNFOLLOW_PROGRESS_FILE)
-        if os.path.exists(UNFOLLOW_SESSION_FILE):
-            os.remove(UNFOLLOW_SESSION_FILE)
+    uf_load_progress()
+    processed = len(uf_progress.get("processed", []))
+    removed = len(uf_progress.get("unfollowed", []))
 
-        uf_followers = set()
-        uf_following = set()
-        uf_non_followers = []
-        uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+    if processed or removed:
+        warning = (
+            f"This deletes the unfollow record for this account:\n\n"
+            f"    • {processed} accounts already processed\n"
+            f"    • {removed} of them recorded as unfollowed\n"
+            f"    • the loaded followers.json / following.json\n\n"
+            f"Nobody gets followed back and nothing changes on Instagram - the "
+            f"accounts you unfollowed stay unfollowed. What is lost is the app's "
+            f"memory of it, so any of them still present in a future export will "
+            f"be processed a second time.\n\n"
+            f"This cannot be undone. Reset anyway?"
+        )
+    else:
+        warning = (
+            "There is no progress to lose yet. This clears the loaded "
+            "followers.json / following.json. Continue?"
+        )
 
-        update_unfollow_ui_state()
-        reset_unfollow_progress()
-        log("🔄 Unfollow reset complete", 'info')
+    if not messagebox.askyesno("Reset unfollow?", warning, icon='warning', default='no'):
+        log("Reset cancelled", 'info')
+        return
 
+    if os.path.exists(UNFOLLOW_PROGRESS_FILE):
+        os.remove(UNFOLLOW_PROGRESS_FILE)
+    if os.path.exists(UNFOLLOW_SESSION_FILE):
+        os.remove(UNFOLLOW_SESSION_FILE)
 
-# Global variable to store user frequencies from last scrape - load from file on startup
-last_scrape_frequencies = load_frequencies()
+    uf_followers = set()
+    uf_following = set()
+    uf_non_followers = []
+    uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+
+    update_unfollow_ui_state()
+    reset_unfollow_progress()
+    log(f"🔄 Unfollow reset complete ({processed} processed entries discarded)", 'info')
+
 
 def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     """Scrape users from hashtags and optionally add to queue."""
@@ -2103,10 +2768,95 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     live_extracted_users = []
     live_frequencies = Counter()
 
+    # Ranks earned in earlier scraping sessions. A rank counts how many scanned
+    # authors a candidate follows, so a second session adds to that count rather
+    # than replacing it - this counter starts from what is already on disk and
+    # every save writes the sum. Starting from zero used to wipe the rank of
+    # every candidate found previously, leaving them at 0 and unrankable.
+    previous_frequencies = load_frequencies()
+
     all_users = []
-    current_frequencies = Counter()  # Track frequencies incrementally
+    current_frequencies = Counter()  # This session's contribution only
     total_authors_processed = 0
     throttle_cooldown_count = 0  # Track consecutive low-extraction authors
+
+    # Authors scraped in earlier sessions, and the ones the current hashtag is
+    # holding back in case it cannot reach its target with unseen authors.
+    author_history = load_author_history()
+    visited_authors = set()
+    deferred_authors = {}
+
+    def scrape_author(username, profile_url, hashtag):
+        """Extract one author's followers and record that the author was used.
+
+        Leaves the browser on the window it was called from. The caller owns the
+        post dialog, if there is one - only the fresh-author path opens one.
+        """
+        nonlocal author_count, total_authors_processed, throttle_cooldown_count
+        global last_scrape_frequencies, live_frequencies
+
+        visited_authors.add(username)
+        author_count += 1
+        total_authors_processed += 1
+        log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
+
+        driver.execute_script("window.open(arguments[0]);", profile_url)
+        driver.switch_to.window(driver.window_handles[-1])
+        time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
+
+        if open_followers_popup():
+            users = extract_users_from_followers(
+                current_hashtag=hashtag,
+                author_num=author_count,
+                total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
+                author_name=username
+            )
+            all_users.extend(users)
+
+            # Update frequencies incrementally for this author
+            current_frequencies.update(users)
+            last_scrape_frequencies = previous_frequencies + current_frequencies
+            save_frequencies(last_scrape_frequencies)
+
+            log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
+
+            # Update live extraction display for real-time feedback
+            live_extracted_users.extend(users)
+            live_frequencies = current_frequencies.copy()  # Mirror current frequencies
+            update_live_extraction_display()
+
+            # Skip authors with very high follower counts to avoid throttling
+            if len(users) < 5:
+                log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
+
+            # Anti-throttling: detect low extraction as rate limiting signal
+            if len(users) < 25:
+                throttle_cooldown_count += 1
+                if throttle_cooldown_count >= 2:
+                    cooldown = random.uniform(8, 12)
+                    log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
+                    time.sleep(cooldown)
+                    throttle_cooldown_count = 0  # Reset after cooldown
+            else:
+                throttle_cooldown_count = 0  # Reset on good extraction
+
+        driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+
+        # Mark the author used even if the popup never opened. Retrying next
+        # session would hit the same wall, and the point of the rotation is to
+        # move on to someone who has not been tried.
+        author_history[username] = datetime.now().isoformat()
+        save_author_history(author_history)
+
+        # Anti-throttling: frequent cooldowns for safety
+        if author_count % CONFIG["AUTHORS_BEFORE_COOLDOWN"] == 0:
+            cooldown = CONFIG["COOLDOWN_DURATION"] + random.uniform(0, 5)
+            log(f"🛡️ Safety cooldown: {cooldown:.0f}s after {author_count} authors...", 'info')
+            time.sleep(cooldown)
+
+        # Random delay between authors - safer range
+        time.sleep(random.uniform(4, 8))
 
     total_hashtags = len(hashtags)
     for hashtag_idx, kw in enumerate(hashtags, 1):
@@ -2123,10 +2873,15 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             current_hashtag=kw
         )
 
-        visited_authors = set()
+        visited_authors.clear()
+        deferred_authors.clear()
         visited_posts = set()
         scroll_count = 0
         author_count = 0
+        # A post has to be opened to find out whose it is, so posts spent on authors
+        # already handled are the price of working along the grid. Counted to keep
+        # that price visible next to what it bought.
+        posts_opened = 0
 
         driver.get(f"https://www.instagram.com/explore/tags/{kw}/")
         time.sleep(random.uniform(2.5, 4.0))  # Randomized initial wait
@@ -2135,29 +2890,62 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             log("⚠️ Rate limit detected during scraping - continuing anyway", 'warning')
             # Don't break - just warn and continue
 
+        # Keep working rightwards through the grid, scrolling only once the posts
+        # already on the page are used up.
+        #
+        # This used to take a fixed slice of the first six links and then scroll.
+        # Instagram appends new posts *below*, so the first six stayed the first
+        # six: the next pass found them all visited, skipped them, and scrolled
+        # again. Only six posts per hashtag were ever opened however high the
+        # scroll count went - and once a few of their authors had been scraped in
+        # an earlier session, the run gave up three authors short and fell back to
+        # reusing old ones, blaming a hashtag it had barely looked at.
+        stop_reason = "target reached"
+        unproductive_scrolls = 0
+
         while (len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
-               and scroll_count < CONFIG["MAX_SCROLLS"]
                and not stop_requested.is_set()):
 
-            posts = driver.find_elements(
-                By.XPATH,
-                "//a[contains(@href, '/p/')]"
-            )
+            hrefs = driver.execute_script(POST_LINKS_JS) or []
+            fresh = [href for href in hrefs if href not in visited_posts]
 
-            for post in posts[:6]:
-                # FIX: Check if we've reached target BEFORE processing each post
+            if not fresh:
+                if scroll_count >= CONFIG["MAX_SCROLLS_PER_HASHTAG"]:
+                    stop_reason = f"hit the {CONFIG['MAX_SCROLLS_PER_HASHTAG']}-scroll ceiling"
+                    break
+
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);"
+                )
+                time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
+                scroll_count += 1
+
+                # A scroll that loads nothing new means the hashtag has no more to
+                # show, or Instagram has stopped answering. Either way there is
+                # nothing to be gained by scrolling on.
+                if len(driver.execute_script(POST_LINKS_JS) or []) <= len(hrefs):
+                    unproductive_scrolls += 1
+                    if unproductive_scrolls >= 2:
+                        stop_reason = "the hashtag stopped loading new posts"
+                        break
+                else:
+                    unproductive_scrolls = 0
+                continue
+
+            for href in fresh:
+                # Check the target before each post, not after
                 if len(visited_authors) >= CONFIG["TARGET_AUTHORS_PER_HASHTAG"]:
                     break
 
                 if stop_requested.is_set():
                     break
 
-                try:
-                    href = post.get_attribute("href")
-                    if not href or href in visited_posts:
-                        continue
+                visited_posts.add(href)
 
-                    visited_posts.add(href)
+                try:
+                    # Found again right before use: opening and closing post
+                    # dialogs invalidates references held from earlier.
+                    post = driver.find_element(By.CSS_SELECTOR, f'a[href="{href}"]')
 
                     driver.execute_script(
                         "arguments[0].scrollIntoView();",
@@ -2166,6 +2954,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                     time.sleep(random.uniform(0.5, 1.5))  # Randomized scroll delay
 
                     driver.execute_script("arguments[0].click();", post)
+                    posts_opened += 1
                     time.sleep(random.uniform(1.5, 2.5))  # Randomized after-click wait
 
                     profile_url = get_author_profile()
@@ -2175,84 +2964,60 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     username = profile_url.rstrip("/").split("/")[-1]
 
-                    if username in visited_authors:
-                        log(f"⏭️ Skip duplicate: {username}", 'warning')
+                    if username in visited_authors or username in author_history:
+                        # Already scraped, either in an earlier session or minutes ago
+                        # in this one. Both mean the same thing from here - move on to
+                        # the next post - so both say it the same way. Authors have
+                        # several posts under one hashtag, so working along the grid
+                        # runs into them repeatedly; none of this is a repeated post,
+                        # those are filtered out before the loop.
+                        #
+                        # What differs is only what gets recorded. An author from an
+                        # earlier session is held back as a fallback candidate, in
+                        # case the hashtag cannot reach its target with new ones -
+                        # that is what makes an author left alone for a while come
+                        # back up. One already scraped in this run is simply done, and
+                        # must not be held back: scrape_author() writes the author
+                        # into the history straight away, so without this guard it
+                        # would be offered to the fallback and have its followers
+                        # popup opened a second time in one run.
+                        if username not in visited_authors:
+                            deferred_authors[username] = profile_url
+
+                        log(f"⏭️ Skip author {username}, already scraped - moving on to the next post")
                         close_post()
                         continue
 
-                    visited_authors.add(username)
-                    author_count += 1
-                    total_authors_processed += 1
-                    log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
-
-                    driver.execute_script(
-                        "window.open(arguments[0]);",
-                        profile_url
-                    )
-                    driver.switch_to.window(driver.window_handles[-1])
-                    time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
-
-                    users = []
-                    if open_followers_popup():
-                        users = extract_users_from_followers(
-                            current_hashtag=kw,
-                            author_num=author_count,
-                            total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
-                            author_name=username
-                        )
-                        all_users.extend(users)
-
-                        # Update frequencies incrementally for this author
-                        current_frequencies.update(users)
-                        last_scrape_frequencies = current_frequencies
-                        save_frequencies(current_frequencies)
-
-                        log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
-
-                        # Update live extraction display for real-time feedback
-                        live_extracted_users.extend(users)
-                        live_frequencies = current_frequencies.copy()  # Mirror current frequencies
-                        update_live_extraction_display()
-
-                        # Skip authors with very high follower counts to avoid throttling
-                        if len(users) < 5:
-                            log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
-
-                        # Anti-throttling: detect low extraction as rate limiting signal
-                        if len(users) < 25:
-                            throttle_cooldown_count += 1
-                            if throttle_cooldown_count >= 2:
-                                cooldown = random.uniform(8, 12)
-                                log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
-                                time.sleep(cooldown)
-                                throttle_cooldown_count = 0  # Reset after cooldown
-                        else:
-                            throttle_cooldown_count = 0  # Reset on good extraction
-
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
+                    scrape_author(username, profile_url, kw)
                     close_post()
-
-                    # Anti-throttling: frequent cooldowns for safety
-                    if author_count % CONFIG["AUTHORS_BEFORE_COOLDOWN"] == 0:
-                        cooldown = CONFIG["COOLDOWN_DURATION"] + random.uniform(0, 5)
-                        log(f"🛡️ Safety cooldown: {cooldown:.0f}s after {author_count} authors...", 'info')
-                        time.sleep(cooldown)
-
-                    # Random delay between authors - safer range
-                    delay = random.uniform(4, 8)
-                    time.sleep(delay)
 
                 except Exception as e:
                     log(f"❌ Post error: {e}", 'error')
 
-            driver.execute_script(
-                "window.scrollTo(0, document.body.scrollHeight);"
+        # Short of the target, so fall back to authors used before, least recently
+        # scraped first. Their profile URLs are already in hand from the posts that
+        # surfaced them, so there is no post to reopen.
+        if (deferred_authors
+                and len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
+                and not stop_requested.is_set()):
+            reusable = order_authors_by_staleness(deferred_authors, author_history)
+            short_by = CONFIG["TARGET_AUTHORS_PER_HASHTAG"] - len(visited_authors)
+            log(
+                f"♻️ #{kw}: {len(visited_authors)} new authors, {short_by} short "
+                f"({stop_reason}). Reusing {min(short_by, len(reusable))} of the "
+                f"{len(reusable)} held back, least recently scraped first",
+                'info'
             )
-            time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
-            scroll_count += 1
+            for username in reusable:
+                if (len(visited_authors) >= CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
+                        or stop_requested.is_set()):
+                    break
+                try:
+                    scrape_author(username, deferred_authors[username], kw)
+                except Exception as e:
+                    log(f"❌ Author error for {username}: {e}", 'error')
 
-        log(f"🎯 Authors collected: {len(visited_authors)}")
+        log(f"🎯 #{kw}: {len(visited_authors)} authors scraped from {posts_opened} posts opened")
 
         # Anti-throttling: longer break between hashtags
         if hashtag_idx < total_hashtags:
@@ -2260,12 +3025,14 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             log(f"☕ Safety break between hashtags: {break_time:.0f}s...", 'info')
             time.sleep(break_time)
 
-    # Rank users by frequency (use the incrementally built counter)
+    # Which users to offer for the queue: this session's finds, best first. The
+    # accumulated counter is for ranking the queue, not for deciding what to add,
+    # so a long history cannot crowd out what was just found.
     ranked_users = [u for u, _ in current_frequencies.most_common()]
 
     # Ensure global frequencies are up to date
-    last_scrape_frequencies = current_frequencies
-    save_frequencies(current_frequencies)
+    last_scrape_frequencies = previous_frequencies + current_frequencies
+    save_frequencies(last_scrape_frequencies)
 
     log(f"\n🏆 Total unique users found: {len(ranked_users)}", 'success')
 
@@ -2305,14 +3072,13 @@ def follow_logic():
             messagebox.showerror("Error", "Please enter valid numbers")
             return
 
-        if driver is None:
+        if not browser_is_open():
             log("❌ Browser not open!", 'error')
+            handle_browser_closed()
             messagebox.showerror("Error", "Please open browser first")
             return
 
         # Update UI
-        start_btn.config(state='disabled')
-        stop_btn.config(state='normal')
         reset_progress()
         # Progress bar always uses 0-100 percentage scale
         progress_bar['maximum'] = 100
@@ -2360,7 +3126,7 @@ def follow_logic():
             # Ask if user wants to add to queue or follow directly
             # Show frequency stats in the dialog
             top_score = ranked_users[0] if ranked_users else None
-            top_freq = last_scrape_frequencies.get(top_score, 0) if top_score else 0
+            top_freq = ranking_frequencies().get(top_score, 0) if top_score else 0
 
             result = messagebox.askyesnocancel(
                 "Search Complete",
@@ -2409,8 +3175,9 @@ def follow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in follow_logic")
     finally:
-        start_btn.config(state='normal')
-        stop_btn.config(state='disabled')
+        # Releases the browser for the next session, and re-checks it rather than
+        # handing back a Start button that cannot work because it was closed.
+        end_session()
         refresh_queue_display()  # Update queue display
         update_live_extraction_display()  # Final update of live extraction
         if not stop_requested.is_set():
@@ -2418,6 +3185,8 @@ def follow_logic():
 
 def run_follow():
     """Start follow in background thread."""
+    if not begin_session():
+        return
     thread = threading.Thread(target=follow_logic, daemon=True)
     thread.start()
     active_threads.append(thread)
@@ -2458,53 +3227,28 @@ def clear_hashtags():
 # ---------------------------
 def refresh_queue_display():
     """Refresh the queue listbox display with frequency rankings."""
+    global displayed_queue_usernames
+
     queue_listbox.delete(0, tk.END)
     # Validate queue before displaying to ensure consistency
     validate_queue()
-    queue = load_queue()
+    ranked = rank_queue(load_queue())
 
-    # Extract usernames from queue (handle both formats)
-    if queue and isinstance(queue[0], dict):
-        # New format
-        queue_usernames = [item['username'] for item in queue]
-    else:
-        # Old format
-        queue_usernames = queue
+    # Remember what each row holds, so acting on a selection never has to
+    # reconstruct the ordering and cannot disagree with what is on screen.
+    displayed_queue_usernames = [username for username, _, _ in ranked[:100]]
 
-    # Get frequencies from last scrape if available, otherwise load from file
-    global last_scrape_frequencies
-    frequencies = last_scrape_frequencies
-    if not frequencies:
-        frequencies = load_frequencies()
-        last_scrape_frequencies = frequencies
+    for user, rank, _ in ranked[:100]:  # Show first 100
+        queue_listbox.insert(tk.END, f"[{rank}] {user}" if rank > 0 else user)
 
-    # Sort queue by frequency (highest first) if frequencies exist
-    if frequencies and queue_usernames:
-        # Create list of (user, frequency) tuples
-        queue_with_freq = [(user, frequencies.get(user, 0)) for user in queue_usernames]
-        # Sort by frequency descending, then by username
-        queue_with_freq.sort(key=lambda x: (-x[1], x[0]))
-    else:
-        queue_with_freq = [(user, 0) for user in queue_usernames]
+    if len(ranked) > 100:
+        queue_listbox.insert(tk.END, f"... and {len(ranked) - 100} more")
 
-    # Display users with their rank/frequency
-    displayed_count = 0
-    for user, freq in queue_with_freq[:100]:  # Show first 100
-        if freq > 0:
-            display_text = f"[{freq}] {user}"
-        else:
-            display_text = user
-        queue_listbox.insert(tk.END, display_text)
-        displayed_count += 1
-
-    if len(queue_with_freq) > 100:
-        queue_listbox.insert(tk.END, f"... and {len(queue_with_freq) - 100} more")
-
-    queue_count_label.config(text=f"Queue: {len(queue_usernames)} users")
+    queue_count_label.config(text=f"Queue: {len(ranked)} users")
 
     # Also update main tab info
     try:
-        main_queue_info.config(text=f"Queue: {len(queue_usernames)} users waiting")
+        main_queue_info.config(text=f"Queue: {len(ranked)} users waiting")
     except:
         pass  # Might not exist yet
 
@@ -2571,28 +3315,11 @@ def remove_from_queue_ui():
     if selection:
         idx = selection[0]
 
-        # Get the sorted queue with frequencies
-        queue = load_queue()
-        global last_scrape_frequencies
-        frequencies = last_scrape_frequencies
-        if not frequencies:
-            frequencies = load_frequencies()
-            last_scrape_frequencies = frequencies
-
-        # Extract usernames from queue (handle both formats)
-        if queue and isinstance(queue[0], dict):
-            queue_usernames = [item['username'] for item in queue]
-        else:
-            queue_usernames = queue
-
-        if frequencies and queue_usernames:
-            queue_with_freq = [(user, frequencies.get(user, 0)) for user in queue_usernames]
-            queue_with_freq.sort(key=lambda x: (-x[1], x[0]))
-        else:
-            queue_with_freq = [(user, 0) for user in queue_usernames]
-
-        if idx < len(queue_with_freq):
-            username = queue_with_freq[idx][0]
+        # Read the row straight off what was drawn. Rebuilding the ordering here
+        # could disagree with the listbox, and the bound also guards the trailing
+        # "... and N more" row, which is not a user.
+        if idx < len(displayed_queue_usernames):
+            username = displayed_queue_usernames[idx]
             remove_from_queue(username)
             refresh_queue_display()
             log(f"Removed {username} from queue", 'info')
@@ -2618,11 +3345,8 @@ def import_queue_from_file():
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    # Handle both old format (list of usernames) and new format (list of dicts)
-                    if data and isinstance(data[0], dict):
-                        usernames = [item['username'] for item in data if isinstance(item, dict) and 'username' in item]
-                    else:
-                        usernames = data
+                    # Accepts an exported queue (dicts) or a plain list of usernames
+                    usernames = [u for u in (queue_username(item) for item in data) if u]
                 elif isinstance(data, dict):
                     usernames = list(data.keys())
         else:
@@ -2649,11 +3373,7 @@ def export_queue_to_file():
 
     try:
         queue = load_queue()
-        # Extract usernames for export (handle both formats)
-        if queue and isinstance(queue[0], dict):
-            usernames = [item['username'] for item in queue]
-        else:
-            usernames = queue
+        usernames = [queue_username(item) for item in queue]
 
         if filepath.endswith('.json'):
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -2731,6 +3451,7 @@ def setup_gui():
     global live_extraction_listbox, live_extraction_label
     global uf_data_label, uf_delay_min_entry, uf_delay_max_entry, uf_limit_entry
     global uf_progress_bar, uf_status_label, uf_stats_label, uf_start_btn, uf_stop_btn
+    global uf_browser_btn
 
     root = tk.Tk()
     root.title("Reciproca - Follow & Unfollow")
@@ -2765,17 +3486,18 @@ def setup_gui():
     notebook = ttk.Notebook(root)
     notebook.pack(fill='both', expand=True, padx=10, pady=10)
 
-    # Tab 1: Main
+    # Tab 1: Main. Follow Queue comes next because the two work together - one
+    # fills the queue, the other shows it - so unfollow does not sit between them.
     main_tab = ttk.Frame(notebook, padding=10)
     notebook.add(main_tab, text='🎯 Auto Follow')
 
-    # Tab 2: Unfollow
-    unfollow_tab = ttk.Frame(notebook, padding=10)
-    notebook.add(unfollow_tab, text='🚫 Unfollow')
-
-    # Tab 3: Queue
+    # Tab 2: Queue
     queue_tab = ttk.Frame(notebook, padding=10)
     notebook.add(queue_tab, text='📋 Follow Queue')
+
+    # Tab 3: Unfollow
+    unfollow_tab = ttk.Frame(notebook, padding=10)
+    notebook.add(unfollow_tab, text='🚫 Unfollow')
 
     # Tab 4: Settings
     settings_tab = ttk.Frame(notebook, padding=10)
@@ -2842,20 +3564,20 @@ def setup_gui():
     mode_frame = ttk.LabelFrame(main_tab, text='Operation Mode', padding=10)
     mode_frame.pack(fill='x', pady=(0, 10))
 
-    mode_var = tk.StringVar(value='queue')  # Default to queue mode
-
-    ttk.Radiobutton(
-        mode_frame,
-        text='📋 Follow from Queue (safe - uses saved list)',
-        variable=mode_var,
-        value='queue'
-    ).pack(anchor='w', pady=2)
+    mode_var = tk.StringVar(value='search')  # Default to deep search
 
     ttk.Radiobutton(
         mode_frame,
         text='🔍 Deep Search (find new users via hashtags)',
         variable=mode_var,
         value='search'
+    ).pack(anchor='w', pady=2)
+
+    ttk.Radiobutton(
+        mode_frame,
+        text='📋 Follow from Queue (safe - uses saved list)',
+        variable=mode_var,
+        value='queue'
     ).pack(anchor='w', pady=2)
 
     main_queue_info = ttk.Label(
@@ -2964,11 +3686,17 @@ def setup_gui():
 
     ttk.Button(
         uf_data_btn_frame, text='📥 Load JSON', command=uf_load_json_files
+    ).pack(side='left', padx=(0, 5))
+
+    # Next to Load JSON rather than with the session controls: both act on the
+    # loaded data, and Reset is what you reach for when a load went wrong.
+    ttk.Button(
+        uf_data_btn_frame, text='🔄 Reset', command=reset_unfollow_app
     ).pack(side='left', padx=(0, 10))
 
     uf_data_label = ttk.Label(
         uf_data_btn_frame,
-        text="🟡 Open the browser and load the JSON files",
+        text="🟡 Load followers.json and following.json to begin",
         font=('Helvetica', 9, 'italic'),
         foreground='gray'
     )
@@ -3018,6 +3746,14 @@ def setup_gui():
     uf_control_frame = ttk.Frame(unfollow_tab)
     uf_control_frame.pack(pady=20)
 
+    uf_browser_btn = ttk.Button(
+        uf_control_frame,
+        text='🌐 Open Browser',
+        command=start_browser,
+        width=20
+    )
+    uf_browser_btn.pack(side='left', padx=5)
+
     uf_start_btn = ttk.Button(
         uf_control_frame,
         text='🚫 Start Unfollow',
@@ -3037,16 +3773,9 @@ def setup_gui():
     )
     uf_stop_btn.pack(side='left', padx=5)
 
-    ttk.Button(
-        uf_control_frame,
-        text='🔄 Reset',
-        command=reset_unfollow_app,
-        width=15
-    ).pack(side='left', padx=5)
-
     ttk.Label(
         unfollow_tab,
-        text="Note: uses the same browser/login as the 'Auto Follow' tab. Open the browser there before starting.",
+        text="Note: shares one browser and login with the 'Auto Follow' tab - opening it here is the same as opening it there.",
         foreground='gray',
         font=('Helvetica', 8, 'italic')
     ).pack(anchor='w', pady=(0, 5))
@@ -3155,19 +3884,6 @@ def setup_gui():
         command=clear_queue_ui
     ).pack(side='left', padx=2)
 
-    # Queue info
-    queue_info_frame = ttk.LabelFrame(queue_tab, text='Queue Info', padding=10)
-    queue_info_frame.pack(fill='x', pady=(0, 10))
-
-    ttk.Label(
-        queue_info_frame,
-        text='The queue stores users to follow across sessions.\n'
-             '• Users are removed from queue after being followed\n'
-             '• Use "Deep Search" mode to find users and add them to queue\n'
-             '• Use "Follow from Queue" mode to safely follow users over time',
-        justify='left'
-    ).pack(anchor='w')
-
     # ==================== SETTINGS TAB ====================
 
     # Create scrollable frame for settings
@@ -3242,8 +3958,8 @@ def setup_gui():
 
     create_config_row(extraction_frame, 0, "TARGET_AUTHORS_PER_HASHTAG", "TARGET_AUTHORS_PER_HASHTAG",
                       "← Number of unique authors to process per hashtag")
-    create_config_row(extraction_frame, 1, "MAX_SCROLLS", "MAX_SCROLLS",
-                      "← Maximum scroll actions per hashtag page")
+    create_config_row(extraction_frame, 1, "MAX_SCROLLS_PER_HASHTAG", "MAX_SCROLLS_PER_HASHTAG",
+                      "← Safety ceiling on scrolls per hashtag (rarely reached)")
     create_config_row(extraction_frame, 2, "FOLLOWER_SCROLL_COUNT", "FOLLOWER_SCROLL_COUNT",
                       "← How many times to scroll the followers list per profile")
     create_config_row(extraction_frame, 3, "AUTHORS_BEFORE_COOLDOWN", "AUTHORS_BEFORE_COOLDOWN",
@@ -3271,6 +3987,20 @@ def setup_gui():
                       "← Soft target for follows per session (not enforced)")
 
     # ─── UNFOLLOW SETTINGS ───
+    bot_frame = ttk.LabelFrame(settings_scrollable_frame, text='🤖 Bot Filter', padding=10)
+    bot_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+
+    create_config_row(bot_frame, 0, "BOT_FILTER_ENABLED", "BOT_FILTER_ENABLED",
+                      "← 1 to check each profile before following it, 0 to follow everything")
+    create_config_row(bot_frame, 1, "BOT_MIN_POSTS", "BOT_MIN_POSTS",
+                      "← Reject a profile with fewer posts than this")
+    create_config_row(bot_frame, 2, "BOT_MIN_FOLLOWERS", "BOT_MIN_FOLLOWERS",
+                      "← Reject a profile with fewer followers than this")
+    create_config_row(bot_frame, 3, "BOT_MAX_FOLLOWING", "BOT_MAX_FOLLOWING",
+                      "← Reject a profile following more accounts than this")
+    create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
+                      "← Reject when following exceeds followers by this many times")
+
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
 
@@ -3307,7 +4037,7 @@ def setup_gui():
                            "COOLDOWN_DURATION", "HASHTAG_BREAK_DURATION", "FOLLOW_BATCH_COOLDOWN",
                            "SESSION_DURATION_MAX", "EXTRACTION_PAUSE_DURATION"]:
                     CONFIG[key] = int(value)
-                elif key in ["TARGET_AUTHORS_PER_HASHTAG", "MAX_SCROLLS", "FOLLOWER_SCROLL_COUNT",
+                elif key in ["TARGET_AUTHORS_PER_HASHTAG", "MAX_SCROLLS_PER_HASHTAG", "FOLLOWER_SCROLL_COUNT",
                              "AUTHORS_BEFORE_COOLDOWN", "FOLLOW_BATCH_SIZE", "MAX_FOLLOWS_PER_SESSION",
                              "RETRY_ATTEMPTS", "RETRY_BACKOFF"]:
                     CONFIG[key] = int(value)
@@ -3341,7 +4071,9 @@ This bot is running in development mode. Use these settings to tune behavior:
 
 EXTRACTION SETTINGS:
 • TARGET_AUTHORS_PER_HASHTAG: How many unique profile authors to process per hashtag
-• MAX_SCROLLS: Maximum scroll actions per hashtag page
+• MAX_SCROLLS_PER_HASHTAG: Safety ceiling on scrolls, not a target. Scrolling stops
+  as soon as enough new authors are found, or once the hashtag stops loading posts,
+  so this is only reached on a hashtag whose authors have nearly all been scraped
 • FOLLOWER_SCROLL_COUNT: How many scroll actions per profile's followers list
 • AUTHORS_BEFORE_COOLDOWN: After how many authors to trigger a short cooldown
 • COOLDOWN_DURATION: Seconds of cooldown between author groups
@@ -3352,6 +4084,12 @@ FOLLOW SETTINGS:
 • FOLLOW_BATCH_SIZE: How many follows before a batch cooldown
 • FOLLOW_BATCH_COOLDOWN: Seconds of cooldown after each batch
 • MAX_FOLLOWS_PER_SESSION: Soft target (not enforced) for follows per session
+
+BOT FILTER:
+Checked on the profile page, just before following, because posts/followers/following
+are not in the followers list a candidate is found in. So it does not keep bots out of
+the queue - it stops them being followed, and drops them from the queue when reached.
+A profile whose counts cannot be read is followed anyway, with a warning in the log.
 
 For development: Lower delays to test faster, increase cooldowns if getting blocked."""
 
@@ -3377,7 +4115,11 @@ For development: Lower delays to test faster, increase cooldowns if getting bloc
 
     # Load last unfollow session (if any) and refresh its display
     uf_auto_load_last_session()
+    update_follow_ui_state()
     update_unfollow_ui_state()
+
+    # Start watching for the browser being closed behind the app's back
+    root.after(BROWSER_WATCH_INTERVAL, watch_browser)
 
     # Handle close
     root.protocol("WM_DELETE_WINDOW", on_closing)

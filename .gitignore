@@ -10,9 +10,11 @@ follow_queue.json
 follow_queue.json.backup
 followed_history.json
 user_frequencies.json
+scraped_authors.json
 hashtags.json
 bot_config.json
 unfollow_progress.json
+unfollow_progress_*.json
 unfollow_last_session.json
 follow_bot.log
 follow_logs_*.txt
