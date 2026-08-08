@@ -952,6 +952,9 @@ driver = None
 # Set while the browser is being opened. Both tabs have an Open Browser button,
 # and without this a click on each would start two Chrome instances.
 browser_opening = threading.Event()
+# Set while a follow or unfollow session owns the browser. Both drive the same
+# Selenium session and the same window, so only one may run at a time.
+session_running = threading.Event()
 stop_requested = threading.Event()
 active_threads = []
 # Live extraction tracking
@@ -1256,16 +1259,50 @@ def can_open_browser():
     return driver is None and not browser_opening.is_set()
 
 
+def begin_session():
+    """Claim the browser for one session, or refuse if another already has it.
+
+    Follow and unfollow drive the same Selenium session and the same window. Two
+    at once would interleave commands on one browser: each would navigate the page
+    out from under the other, and both would then act on whatever happened to be
+    loaded - unfollowing an account the follow session had just opened, or
+    following one the unfollow session was on.
+
+    Both tabs disable their Start buttons while a session runs; this is the guard
+    that does not depend on a button state being right. Called from the GUI thread
+    only, so the check and the claim cannot race.
+    """
+    if session_running.is_set():
+        log("⚠️ A session is already running - stop it before starting another", 'warning')
+        return False
+
+    session_running.set()
+    stop_requested.clear()
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+    return True
+
+
+def end_session():
+    """Release the browser when a session finishes and settle both tabs."""
+    session_running.clear()
+    refresh_browser_state()
+
+
 def update_follow_ui_state():
-    """Follow-tab buttons in agreement with whether a browser is actually open.
+    """Follow-tab buttons in agreement with the browser and any running session.
 
     One place decides, so no exit path can leave Start Following enabled with no
     browser behind it, or Open Browser disabled after the browser is gone - which
     left the app stuck until it was restarted.
     """
     try:
+        running = session_running.is_set()
         browser_btn.config(state='normal' if can_open_browser() else 'disabled')
-        start_btn.config(state='normal' if driver is not None else 'disabled')
+        start_btn.config(
+            state='normal' if driver is not None and not running else 'disabled'
+        )
+        stop_btn.config(state='normal' if running else 'disabled')
     except Exception as e:
         logger.debug(f"update_follow_ui_state error: {e}")
 
@@ -1320,7 +1357,10 @@ def stop_bot():
     """Request graceful stop."""
     stop_requested.set()
     log("⏹️ Stop requested, finishing current operation...", 'warning')
+    # Both tabs' Stop buttons come here, so both acknowledge the click. The session
+    # itself keeps running until it reaches a checkpoint.
     stop_btn.config(state='disabled')
+    uf_stop_btn.config(state='disabled')
 
     # Save any already extracted users to queue if scraping was in progress
     # Only do this if we're actually in extraction mode, not during follow
@@ -2329,9 +2369,6 @@ def unfollow_logic():
 
         log(f"🚀 Starting UNFOLLOW: {len(to_process)} users left to process")
 
-        uf_start_btn.config(state='disabled')
-        uf_stop_btn.config(state='normal')
-        start_btn.config(state='disabled')  # Prevent concurrent follow session on same driver
         reset_unfollow_progress()
 
         random.shuffle(to_process)
@@ -2346,16 +2383,17 @@ def unfollow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in unfollow_logic")
     finally:
-        uf_stop_btn.config(state='disabled')
-        # Same here: the unfollow session shares the browser, which may be gone.
-        # This also refreshes the summary counts.
-        refresh_browser_state()
+        # Releases the browser for the next session, re-checks it in case it was
+        # closed while this ran, and refreshes the summary counts.
+        end_session()
         if not stop_requested.is_set():
             reset_unfollow_progress()
 
 
 def run_unfollow():
     """Start unfollow in background thread."""
+    if not begin_session():
+        return
     thread = threading.Thread(target=unfollow_logic, daemon=True)
     thread.start()
     active_threads.append(thread)
@@ -2382,10 +2420,14 @@ def update_unfollow_ui_state():
     """
     try:
         uf_load_progress()
+        running = session_running.is_set()
         uf_browser_btn.config(state='normal' if can_open_browser() else 'disabled')
         uf_start_btn.config(
-            state='normal' if driver is not None and uf_non_followers else 'disabled'
+            state='normal'
+            if driver is not None and uf_non_followers and not running
+            else 'disabled'
         )
+        uf_stop_btn.config(state='normal' if running else 'disabled')
 
         if not uf_non_followers:
             uf_data_label.config(text="🟡 Load followers.json and following.json to begin")
@@ -2730,8 +2772,6 @@ def follow_logic():
             return
 
         # Update UI
-        start_btn.config(state='disabled')
-        stop_btn.config(state='normal')
         reset_progress()
         # Progress bar always uses 0-100 percentage scale
         progress_bar['maximum'] = 100
@@ -2828,10 +2868,9 @@ def follow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in follow_logic")
     finally:
-        stop_btn.config(state='disabled')
-        # The browser may have been closed while the session ran, so re-check it
-        # rather than handing back a Start button that cannot work.
-        refresh_browser_state()
+        # Releases the browser for the next session, and re-checks it rather than
+        # handing back a Start button that cannot work because it was closed.
+        end_session()
         refresh_queue_display()  # Update queue display
         update_live_extraction_display()  # Final update of live extraction
         if not stop_requested.is_set():
@@ -2839,6 +2878,8 @@ def follow_logic():
 
 def run_follow():
     """Start follow in background thread."""
+    if not begin_session():
+        return
     thread = threading.Thread(target=follow_logic, daemon=True)
     thread.start()
     active_threads.append(thread)

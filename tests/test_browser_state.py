@@ -129,6 +129,65 @@ class BrowserStateTest(unittest.TestCase):
         self.assertEqual(len(R.root.scheduled), 1)
 
 
+class OneSessionAtATimeTest(unittest.TestCase):
+    """Follow and unfollow drive the same browser window, so only one may run.
+
+    Deep Search used to leave Start Unfollow clickable: the two sessions would
+    then issue commands on one Selenium session, each navigating the page out from
+    under the other, and act on whatever was loaded.
+    """
+
+    def setUp(self):
+        _stubs.install_fake_ui(R)
+        R.driver = LiveDriver()
+        R.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
+
+    def test_both_start_buttons_are_off_while_a_session_runs(self):
+        R.update_follow_ui_state()
+        R.update_unfollow_ui_state()
+        self.assertEqual(R.start_btn.state, 'normal', "idle: both are available")
+        self.assertEqual(R.uf_start_btn.state, 'normal')
+
+        self.assertTrue(R.begin_session())
+
+        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.uf_start_btn.state, 'disabled')
+        self.assertEqual(R.stop_btn.state, 'normal', "Stop is how you get out")
+        self.assertEqual(R.uf_stop_btn.state, 'normal')
+
+    def test_a_second_session_is_refused(self):
+        self.assertTrue(R.begin_session())
+        self.assertFalse(R.begin_session(), "the browser is already claimed")
+
+    def test_starting_unfollow_mid_session_spawns_nothing(self):
+        """The guard that does not depend on a button state being right."""
+        R.begin_session()
+
+        R.run_unfollow()
+        R.run_follow()
+
+        self.assertEqual(R.active_threads, [], "no worker may be started")
+
+    def test_finishing_hands_the_browser_back(self):
+        R.begin_session()
+        R.end_session()
+
+        self.assertFalse(R.session_running.is_set())
+        self.assertEqual(R.start_btn.state, 'normal')
+        self.assertEqual(R.uf_start_btn.state, 'normal')
+        self.assertEqual(R.stop_btn.state, 'disabled')
+
+    def test_a_session_that_loses_the_browser_ends_with_start_off(self):
+        R.begin_session()
+        R.driver = DeadDriver()
+
+        R.end_session()
+
+        self.assertIsNone(R.driver)
+        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.browser_btn.state, 'normal')
+
+
 class _AliveThread:
     def is_alive(self):
         return True

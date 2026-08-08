@@ -122,6 +122,8 @@ def install_fake_ui(module):
     module.uf_data_label = FakeWidget()
     module.driver = None
     module.browser_opening.clear()
+    module.session_running.clear()
+    module.stop_requested.clear()
     module.active_threads[:] = []
     messagebox.shown.clear()
     messagebox.answer = True
