@@ -107,6 +107,13 @@ Notes:
 
 ## Tests
 
+The Python tests cover the queue's ranking, the rotation of scraped authors and
+the browser-state handling. They need no browser and no extra packages:
+
+```bash
+python -m unittest discover -s tests -t tests
+```
+
 `tests/test_extraction.js` checks the followers-dialog extraction: that each row's
 follow button is matched to the right user, so accounts you already follow are
 excluded. It reads the script straight out of `reciproca.py`, so it cannot drift
@@ -117,7 +124,7 @@ npm install jsdom
 node tests/test_extraction.js
 ```
 
-Node and jsdom are only needed for this test, not to run the app.
+Node and jsdom are only needed for that one test, not to run the app.
 
 ## Generated files (git-ignored)
 

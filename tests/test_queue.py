@@ -4,44 +4,16 @@ The invariant under test is that the order shown in the listbox is the order the
 follow loop consumes: both go through rank_queue(). They used to be computed
 separately, so the ranking was displayed but never acted on.
 
-Runs on stdlib only. reciproca.py pulls in Selenium and Tkinter at import time
-purely for the GUI and the browser, neither of which the queue logic touches, so
-those modules are stubbed out rather than installed.
+Runs on stdlib only; see _stubs.py for why Selenium and Tkinter are stubbed.
 
     python3 tests/test_queue.py
 """
 import os
-import sys
 import tempfile
-import types
 import unittest
 
-STUBBED = [
-    "selenium", "selenium.common", "selenium.common.exceptions",
-    "selenium.webdriver", "selenium.webdriver.chrome",
-    "selenium.webdriver.chrome.service", "selenium.webdriver.common",
-    "selenium.webdriver.common.by", "selenium.webdriver.support",
-    "selenium.webdriver.support.ui", "webdriver_manager", "webdriver_manager.chrome",
-    "tkinter", "tkinter.ttk", "tkinter.scrolledtext", "tkinter.messagebox",
-    "tkinter.filedialog",
-]
+import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
 
-for name in STUBBED:
-    sys.modules.setdefault(name, types.ModuleType(name))
-
-_exceptions = sys.modules["selenium.common.exceptions"]
-for _name in ("NoSuchElementException", "StaleElementReferenceException", "TimeoutException"):
-    setattr(_exceptions, _name, type(_name, (Exception,), {}))
-sys.modules["selenium.webdriver.chrome.service"].Service = object
-sys.modules["selenium.webdriver.common.by"].By = object
-sys.modules["selenium.webdriver.support"].expected_conditions = object
-sys.modules["selenium.webdriver.support.ui"].WebDriverWait = object
-sys.modules["webdriver_manager.chrome"].ChromeDriverManager = object
-for _attr in ("ttk", "scrolledtext", "messagebox", "filedialog"):
-    setattr(sys.modules["tkinter"], _attr, sys.modules["tkinter." + _attr])
-sys.modules["tkinter"].END = "end"
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import reciproca as R  # noqa: E402
 from reciproca import order_authors_by_staleness  # noqa: E402
 

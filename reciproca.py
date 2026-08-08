@@ -23,6 +23,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -1075,9 +1076,7 @@ def open_browser():
         driver.get("https://www.instagram.com/")
         log("✅ Browser opened! Please login manually.", 'success')
 
-        # Enable start button
-        start_btn.config(state='normal')
-        browser_btn.config(state='disabled')
+        update_follow_ui_state()
         update_unfollow_ui_state()
 
     except Exception as e:
@@ -1092,7 +1091,91 @@ def open_browser():
             "Browser Error",
             f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details."
         )
-        browser_btn.config(state='normal')
+        refresh_browser_state()
+
+# How often to check that the browser is still there, in milliseconds.
+BROWSER_WATCH_INTERVAL = 2000
+
+
+def browser_is_open():
+    """True if the browser is still there, asked of the browser itself.
+
+    The `driver` global is not evidence: closing the Chrome window leaves it
+    holding a dead session that looks perfectly valid until something tries to
+    use it.
+
+    Never call this from the GUI thread while a worker thread is driving the same
+    session - one Selenium session commanded from two threads interleaves badly.
+    """
+    if driver is None:
+        return False
+    try:
+        return bool(driver.window_handles)
+    except WebDriverException as e:
+        logger.info(f"Browser probe failed, treating the browser as closed: {type(e).__name__}")
+        return False
+
+
+def update_follow_ui_state():
+    """Follow-tab buttons in agreement with whether a browser is actually open.
+
+    One place decides, so no exit path can leave Start Following enabled with no
+    browser behind it, or Open Browser disabled after the browser is gone - which
+    left the app stuck until it was restarted.
+    """
+    try:
+        has_browser = driver is not None
+        browser_btn.config(state='disabled' if has_browser else 'normal')
+        start_btn.config(state='normal' if has_browser else 'disabled')
+    except Exception as e:
+        logger.debug(f"update_follow_ui_state error: {e}")
+
+
+def handle_browser_closed():
+    """Forget a browser that is gone and let the user open a new one."""
+    global driver
+
+    if driver is not None:
+        try:
+            driver.quit()  # Release chromedriver; the browser itself is already gone
+        except Exception as e:
+            logger.debug(f"Error quitting the closed browser: {e}")
+        driver = None
+        log("🌐 Browser closed - click 'Open Browser' to start a new session", 'warning')
+
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+
+
+def refresh_browser_state():
+    """Re-check the browser and bring both tabs' controls in line with it."""
+    if driver is not None and not browser_is_open():
+        handle_browser_closed()
+    else:
+        update_follow_ui_state()
+        update_unfollow_ui_state()
+
+
+def watch_browser():
+    """Notice the browser being closed, instead of waiting for something to fail.
+
+    Closing the Chrome window used to go unremarked: Start Following stayed
+    enabled while every click failed, and Open Browser stayed disabled, so there
+    was no way back without restarting the app.
+
+    Only probes while no worker thread is running, to keep two threads off the
+    same Selenium session. A browser closed mid-session is caught by the worker
+    failing, and by the check when the session finishes.
+    """
+    try:
+        active_threads[:] = [t for t in active_threads if t.is_alive()]
+        if driver is not None and not active_threads and not browser_is_open():
+            handle_browser_closed()
+    except Exception as e:
+        logger.debug(f"watch_browser error: {e}")
+    finally:
+        root.after(BROWSER_WATCH_INTERVAL, watch_browser)
+
 
 def stop_bot():
     """Request graceful stop."""
@@ -2081,8 +2164,9 @@ def unfollow_logic():
             messagebox.showerror("Error", "Please enter valid numbers")
             return
 
-        if driver is None:
+        if not browser_is_open():
             log("❌ Browser not open!", 'error')
+            handle_browser_closed()
             messagebox.showerror("Error", "Please open the browser first (Auto Follow tab)")
             return
 
@@ -2118,9 +2202,9 @@ def unfollow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in unfollow_logic")
     finally:
-        uf_start_btn.config(state='normal')
         uf_stop_btn.config(state='disabled')
-        start_btn.config(state='normal')
+        # Same here: the unfollow session shares the browser, which may be gone.
+        refresh_browser_state()
         refresh_unfollow_display()
         if not stop_requested.is_set():
             reset_unfollow_progress()
@@ -2448,8 +2532,9 @@ def follow_logic():
             messagebox.showerror("Error", "Please enter valid numbers")
             return
 
-        if driver is None:
+        if not browser_is_open():
             log("❌ Browser not open!", 'error')
+            handle_browser_closed()
             messagebox.showerror("Error", "Please open browser first")
             return
 
@@ -2552,8 +2637,10 @@ def follow_logic():
         log(f"❌ Fatal error: {e}", 'error')
         logger.exception("Fatal error in follow_logic")
     finally:
-        start_btn.config(state='normal')
         stop_btn.config(state='disabled')
+        # The browser may have been closed while the session ran, so re-check it
+        # rather than handing back a Start button that cannot work.
+        refresh_browser_state()
         refresh_queue_display()  # Update queue display
         update_live_extraction_display()  # Final update of live extraction
         if not stop_requested.is_set():
@@ -3458,7 +3545,11 @@ For development: Lower delays to test faster, increase cooldowns if getting bloc
 
     # Load last unfollow session (if any) and refresh its display
     uf_auto_load_last_session()
+    update_follow_ui_state()
     update_unfollow_ui_state()
+
+    # Start watching for the browser being closed behind the app's back
+    root.after(BROWSER_WATCH_INTERVAL, watch_browser)
 
     # Handle close
     root.protocol("WM_DELETE_WINDOW", on_closing)
