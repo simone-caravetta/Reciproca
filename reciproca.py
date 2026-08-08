@@ -2539,12 +2539,6 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     author_history = load_author_history()
     visited_authors = set()
     deferred_authors = {}
-    # Every author scraped anywhere in this run. Kept apart from visited_authors,
-    # which is cleared per hashtag because it counts progress towards that
-    # hashtag's target: an author scraped under one hashtag must still not be
-    # held back under the next, or the fallback could extract their followers a
-    # second time in one run and count them twice towards every candidate's rank.
-    scraped_this_run = set()
 
     def scrape_author(username, profile_url, hashtag):
         """Extract one author's followers and record that the author was used.
@@ -2556,7 +2550,6 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         global last_scrape_frequencies, live_frequencies
 
         visited_authors.add(username)
-        scraped_this_run.add(username)
         author_count += 1
         total_authors_processed += 1
         log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
@@ -2742,7 +2735,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                         # into the history straight away, so without this guard it
                         # would be offered to the fallback and have its followers
                         # popup opened a second time in one run.
-                        if username not in scraped_this_run:
+                        if username not in visited_authors:
                             deferred_authors[username] = profile_url
 
                         log(f"⏭️ Skip author {username}, already scraped - moving on to the next post")
