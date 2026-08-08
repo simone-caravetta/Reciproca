@@ -2,9 +2,19 @@
 
 # Reciproca
 
-Desktop tool (Tkinter + Selenium) that follows and unfollows on Instagram from one
-tabbed GUI: **Auto Follow** (from a saved queue, or by hashtag search), **Follow
-Queue**, **Unfollow** (people who don't follow you back), **Settings** and **Logs**.
+Desktop tool (Python, Tkinter, Selenium) for **testing growth strategies** on your own
+Instagram account and **managing** the follow relationships they produce.
+
+The approach is reciprocal growth. Reciproca looks for accounts that already follow
+several people posting under your hashtags — a sign they follow within your niche and
+might follow back — ranks candidates by how strong that signal is, and works down the
+list at a deliberately human pace. Managing the other half is the **Unfollow** tab: it
+reads your Instagram data export and clears the accounts that never reciprocated.
+
+It is built for testing rather than for volume. Every threshold, delay and limit is a
+setting, and every decision is written to the log with the reason for it, so you can
+change one thing at a time and see what that changed. Five tabs: **Auto Follow**,
+**Follow Queue**, **Unfollow**, **Settings**, **Logs**.
 
 ## Before you start
 
