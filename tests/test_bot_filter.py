@@ -50,27 +50,59 @@ class ParseCountTest(unittest.TestCase):
             self.assertIsNone(R.parse_count(value), repr(value))
 
 
-class ParsePostsCountTest(unittest.TestCase):
-    def test_finds_the_count_beside_the_word(self):
-        header = "mario.rossi\n847 posts\n1,234 followers\n567 following\nPhotographer"
-        self.assertEqual(R.parse_posts_count(header), 847)
+class ParseLabelledCountTest(unittest.TestCase):
+    """Instagram renders each count and its label as separate elements, so the
+    header's text puts a newline between them."""
 
-    def test_italian_header(self):
-        header = "mario.rossi\n847 post\n1.234 follower\n567 seguiti"
-        self.assertEqual(R.parse_posts_count(header), 847)
+    ENGLISH = "mario.rossi\n847\nposts\n1,234\nfollowers\n567\nfollowing\nPhotographer"
+    ITALIAN = "mario.rossi\n847\npost\n1.234\nfollower\n567\nseguiti"
+
+    def counts(self, header):
+        return (
+            R.parse_labelled_count(header, R.POSTS_LABEL_MARKERS),
+            R.parse_labelled_count(header, R.FOLLOWERS_LABEL_MARKERS),
+            R.parse_labelled_count(header, R.FOLLOWING_LABEL_MARKERS),
+        )
+
+    def test_all_three_in_english(self):
+        self.assertEqual(self.counts(self.ENGLISH), (847, 1234, 567))
+
+    def test_all_three_in_italian(self):
+        """Italian uses "follower" whatever the number, so the English plural has to
+        be tried first or it would match the singular form as well."""
+        self.assertEqual(self.counts(self.ITALIAN), (847, 1234, 567))
+
+    def test_counts_on_one_line(self):
+        header = "mario.rossi 847 posts 1,234 followers 567 following"
+        self.assertEqual(self.counts(header), (847, 1234, 567))
+
+    def test_a_following_button_is_not_mistaken_for_the_count(self):
+        """A profile you already follow carries a "Following" button in the header."""
+        header = "x\n12\nposts\n9\nfollowers\n2,500\nfollowing\nFollowing\nMessage"
+        self.assertEqual(R.parse_labelled_count(header, R.FOLLOWING_LABEL_MARKERS), 2500)
+
+    def test_a_label_never_reads_across_another_count(self):
+        """Letters cannot appear inside a count, which is what keeps the search for
+        one label from swallowing the number belonging to another."""
+        header = "1,234\nfollowers\n567\nfollowing"
+        self.assertEqual(R.parse_labelled_count(header, R.FOLLOWING_LABEL_MARKERS), 567)
 
     def test_not_taken_from_position(self):
-        """The display name can start with digits, and the bio holds numbers too."""
-        header = "24k.studio\n0 posts\n9 followers\n2,500 following"
-        self.assertEqual(R.parse_posts_count(header), 0)
+        """The display name can start with digits."""
+        header = "24k.studio\n0\nposts\n9\nfollowers\n2,500\nfollowing"
+        self.assertEqual(self.counts(header), (0, 9, 2500))
+
+    def test_thousands_separated_by_a_space(self):
+        header = "x\n0\nposts\n1 234\nfollowers\n12 500\nfollowing"
+        self.assertEqual(self.counts(header), (0, 1234, 12500))
 
     def test_a_bio_mentioning_posting_is_not_a_count(self):
-        header = "mario.rossi\nI post every day\n12 followers"
-        self.assertIsNone(R.parse_posts_count(header))
+        header = "mario.rossi\nI post every day\n12\nfollowers"
+        self.assertIsNone(R.parse_labelled_count(header, R.POSTS_LABEL_MARKERS))
 
     def test_no_header(self):
-        self.assertIsNone(R.parse_posts_count(None))
-        self.assertIsNone(R.parse_posts_count(""))
+        for header in (None, ""):
+            self.assertEqual(self.counts(header), (None, None, None))
 
 
 class BotVerdictTest(unittest.TestCase):

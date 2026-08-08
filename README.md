@@ -48,7 +48,8 @@ found in, so the check runs at follow time, where the browser is already on the
 profile and it costs nothing extra. It therefore does not keep bots out of the
 queue — it stops them being followed. A profile whose counts cannot be read is
 followed anyway, with a warning in the log, so a change in Instagram's markup cannot
-quietly block every follow.
+quietly block every follow — and if only one count is unreadable the log says which,
+since that check alone stops happening.
 
 ### Coming Soon...
 - Semantic ranking of users during the Deep Search phase, powered by AI
@@ -61,7 +62,8 @@ match button and warning text per locale. **Currently supported: English and Ita
 
 All locale strings live in one block at the top of `reciproca.py`
 (`FOLLOWING_BUTTON_MARKERS`, `FOLLOW_BUTTON_MARKERS`, `UNFOLLOW_CONFIRM_MARKERS`,
-`POSTS_LABEL_MARKERS`, `CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a
+`POSTS_LABEL_MARKERS`, `FOLLOWERS_LABEL_MARKERS`, `FOLLOWING_LABEL_MARKERS`,
+`CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a
 language means editing that block only — no call site needs to change.
 
 ## Building a standalone Windows executable

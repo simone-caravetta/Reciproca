@@ -151,11 +151,20 @@ UNFOLLOW_CONFIRM_MARKERS = (
     "non seguire", "smetti",    # IT
 )
 
-# The word beside the post count in a profile header. Only the post count needs one:
-# the follower and following counts are found by their links, which carry no text.
-# "post" is a prefix of the English plural, so a single entry covers both languages.
+# The words beside the three counts in a profile header. The follower and following
+# counts are normally found by their links, but those links are not guaranteed to be
+# there, so reading the header text is the fallback for all three.
+#
+# Longest first: Italian uses "follower" for any number, so the English plural has to
+# be tried before the form that is also a prefix of it.
 POSTS_LABEL_MARKERS = (
-    "post",   # EN "posts" / IT "post"
+    "post",                     # EN "posts" / IT "post"
+)
+FOLLOWERS_LABEL_MARKERS = (
+    "followers", "follower",    # EN / IT
+)
+FOLLOWING_LABEL_MARKERS = (
+    "following", "seguiti",     # EN / IT
 )
 
 # Labels on a post dialog's close button. Matched via XPath contains(), which is
@@ -259,21 +268,30 @@ def bot_rejection_reason(posts, followers, following):
     return None
 
 
-def parse_posts_count(header_text):
-    """The post count out of a profile header's text, or None.
+# What can appear inside a rendered count: digits, a thousands separator (either ,
+# or . by locale, or a space in some), and nothing else. Letters are excluded on
+# purpose, so a search for one count's label can never reach across another count.
+COUNT_CHARS = r'[\d.,   ]'
 
-    Found by the word beside it rather than by position: the header also carries the
-    follower and following counts, the display name and the bio, so the post count
-    is not reliably the first number in it.
+
+def parse_labelled_count(header_text, markers):
+    """The count beside one of `markers` in a profile header's text, or None.
+
+    Found by the word next to it rather than by position: the header carries all
+    three counts plus the display name and the bio, so none of them is reliably the
+    first number in it. Instagram renders each count and its label as separate
+    elements, so what sits between them is usually a newline.
     """
-    for marker in POSTS_LABEL_MARKERS:
+    for marker in markers:
         match = re.search(
-            r'([\d.,]+\s*[KkMmBb]?)\s*' + re.escape(marker),
+            r'(\d' + COUNT_CHARS + r'*[KkMmBb]?)\s*' + re.escape(marker),
             header_text or "",
             re.IGNORECASE,
         )
         if match:
-            return parse_count(match.group(1))
+            value = parse_count(match.group(1))
+            if value is not None:
+                return value
     return None
 
 
@@ -427,15 +445,18 @@ if (!header) return null;
 
 function read(link) {
     if (!link) return null;
-    const titled = link.querySelector('[title]');
+    // The title may be on the link itself, which querySelector would not reach.
+    const titled = link.matches('[title]') ? link : link.querySelector('[title]');
     const title = titled ? titled.getAttribute('title') : null;
     return {title: title, text: link.innerText || link.textContent || ''};
 }
 
+// Matched loosely on purpose: the href is not always exactly "/user/followers/" -
+// it can carry a query string or lose its trailing slash.
 return {
     headerText: header.innerText || header.textContent || '',
-    followers: read(header.querySelector('a[href$="/followers/"]')),
-    following: read(header.querySelector('a[href$="/following/"]')),
+    followers: read(header.querySelector('a[href*="/followers"]')),
+    following: read(header.querySelector('a[href*="/following"]')),
 };
 """
 
@@ -2190,7 +2211,9 @@ def read_profile_stats():
     if not raw:
         return None, None, None
 
-    def count(entry):
+    header_text = raw.get('headerText') or ""
+
+    def from_link(entry):
         if not entry:
             return None
         # The title attribute holds the exact figure where the text is abbreviated,
@@ -2198,23 +2221,50 @@ def read_profile_stats():
         from_title = parse_count(entry.get('title'))
         return from_title if from_title is not None else parse_count(entry.get('text'))
 
+    # Two independent routes to each count, because one link that cannot be found
+    # used to mean that check simply did not happen.
+    followers = from_link(raw.get('followers'))
+    if followers is None:
+        followers = parse_labelled_count(header_text, FOLLOWERS_LABEL_MARKERS)
+
+    following = from_link(raw.get('following'))
+    if following is None:
+        following = parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS)
+
     return (
-        parse_posts_count(raw.get('headerText')),
-        count(raw.get('followers')),
-        count(raw.get('following')),
+        parse_labelled_count(header_text, POSTS_LABEL_MARKERS),
+        followers,
+        following,
     )
 
 
 def profile_bot_reason():
     """Why the profile in the browser looks automated, or None to follow it."""
-    posts, followers, following = read_profile_stats()
+    # The header shell can render before the counts arrive, so give them a moment
+    # rather than reading zeroes off a half-built page. Costs nothing when the
+    # numbers are already there, which is the normal case.
+    for attempt in range(3):
+        posts, followers, following = read_profile_stats()
+        if None not in (posts, followers, following):
+            break
+        if attempt < 2:
+            time.sleep(1)
 
-    if posts is None and followers is None and following is None:
-        # Fail open - but say so. Staying silent here would look exactly like a
-        # profile that passed the check, and if Instagram's header changes this is
-        # the only way to find out the filter has stopped doing anything.
-        log("⚠️ Could not read this profile's counts - bot filter skipped", 'warning')
+    missing = [
+        name for name, value in
+        (("posts", posts), ("followers", followers), ("following", following))
+        if value is None
+    ]
+
+    # Fail open - but never quietly. A count that cannot be read takes no part in the
+    # decision, so staying silent would look exactly like a profile that passed the
+    # check, and a partly unreadable header would disable part of the filter without
+    # anyone noticing. This is the only way to find out Instagram changed its markup.
+    if len(missing) == 3:
+        log("⚠️ Could not read any of this profile's counts - bot filter skipped", 'warning')
         return None
+    if missing:
+        log(f"⚠️ Could not read {' or '.join(missing)} here - that check was skipped", 'warning')
 
     reason = bot_rejection_reason(posts, followers, following)
     logger.info(
@@ -2249,15 +2299,6 @@ def follow_user(username, delay_min, delay_max):
             # stats.increment('skipped_rate_limited')
             # return False, "rate_limited"
 
-        # The counts only exist on the profile, and the browser is already on it, so
-        # this is the one place the check is free. It is a gate rather than a filter:
-        # by now the account is in the queue, and this is what stops it being followed.
-        if CONFIG["BOT_FILTER_ENABLED"]:
-            bot_reason = profile_bot_reason()
-            if bot_reason:
-                log(f"🤖 Skip {username} | looks automated: {bot_reason}", 'warning')
-                return False, "filtered_bot"
-
         # Find follow button
         btn, status = find_follow_button()
 
@@ -2272,6 +2313,20 @@ def follow_user(username, delay_min, delay_max):
             return False, "button_error"
 
         if status == "follow" and btn:
+            # The counts only exist on the profile, and the browser is already on it,
+            # so this is the one place the check is free. It is a gate rather than a
+            # filter: by now the account is in the queue, and this is what stops it
+            # being followed.
+            #
+            # Checked here rather than on arrival so that a profile already followed,
+            # or one with no button to press, is settled as what it is - it needs no
+            # counts, and would otherwise be recorded as filtered instead.
+            if CONFIG["BOT_FILTER_ENABLED"]:
+                bot_reason = profile_bot_reason()
+                if bot_reason:
+                    log(f"🤖 Skip {username} | looks automated: {bot_reason}", 'warning')
+                    return False, "filtered_bot"
+
             # Store button reference for validation comparison
             original_btn = btn
 
