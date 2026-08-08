@@ -25,7 +25,7 @@ Requires Google Chrome to be installed: `webdriver-manager` automatically downlo
 
 ### Follow
 1. **Auto Follow** tab → **Open Browser**, then log into Instagram manually.
-2. Pick the mode: **Follow from Queue** (follows users already queued) or **Deep Search** (finds new users via hashtags and adds them to the queue).
+2. Pick the mode: **Deep Search** (finds new users via hashtags and adds them to the queue, selected by default) or **Follow from Queue** (follows users already queued).
 3. Set delay min/max and the follow limit for the session, then **Start Following**.
 
 ### Unfollow

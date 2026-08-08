@@ -3138,17 +3138,18 @@ def setup_gui():
     notebook = ttk.Notebook(root)
     notebook.pack(fill='both', expand=True, padx=10, pady=10)
 
-    # Tab 1: Main
+    # Tab 1: Main. Follow Queue comes next because the two work together - one
+    # fills the queue, the other shows it - so unfollow does not sit between them.
     main_tab = ttk.Frame(notebook, padding=10)
     notebook.add(main_tab, text='🎯 Auto Follow')
 
-    # Tab 2: Unfollow
-    unfollow_tab = ttk.Frame(notebook, padding=10)
-    notebook.add(unfollow_tab, text='🚫 Unfollow')
-
-    # Tab 3: Queue
+    # Tab 2: Queue
     queue_tab = ttk.Frame(notebook, padding=10)
     notebook.add(queue_tab, text='📋 Follow Queue')
+
+    # Tab 3: Unfollow
+    unfollow_tab = ttk.Frame(notebook, padding=10)
+    notebook.add(unfollow_tab, text='🚫 Unfollow')
 
     # Tab 4: Settings
     settings_tab = ttk.Frame(notebook, padding=10)
@@ -3215,20 +3216,20 @@ def setup_gui():
     mode_frame = ttk.LabelFrame(main_tab, text='Operation Mode', padding=10)
     mode_frame.pack(fill='x', pady=(0, 10))
 
-    mode_var = tk.StringVar(value='queue')  # Default to queue mode
-
-    ttk.Radiobutton(
-        mode_frame,
-        text='📋 Follow from Queue (safe - uses saved list)',
-        variable=mode_var,
-        value='queue'
-    ).pack(anchor='w', pady=2)
+    mode_var = tk.StringVar(value='search')  # Default to deep search
 
     ttk.Radiobutton(
         mode_frame,
         text='🔍 Deep Search (find new users via hashtags)',
         variable=mode_var,
         value='search'
+    ).pack(anchor='w', pady=2)
+
+    ttk.Radiobutton(
+        mode_frame,
+        text='📋 Follow from Queue (safe - uses saved list)',
+        variable=mode_var,
+        value='queue'
     ).pack(anchor='w', pady=2)
 
     main_queue_info = ttk.Label(
@@ -3337,6 +3338,12 @@ def setup_gui():
 
     ttk.Button(
         uf_data_btn_frame, text='📥 Load JSON', command=uf_load_json_files
+    ).pack(side='left', padx=(0, 5))
+
+    # Next to Load JSON rather than with the session controls: both act on the
+    # loaded data, and Reset is what you reach for when a load went wrong.
+    ttk.Button(
+        uf_data_btn_frame, text='🔄 Reset', command=reset_unfollow_app
     ).pack(side='left', padx=(0, 10))
 
     uf_data_label = ttk.Label(
@@ -3417,13 +3424,6 @@ def setup_gui():
         state='disabled'
     )
     uf_stop_btn.pack(side='left', padx=5)
-
-    ttk.Button(
-        uf_control_frame,
-        text='🔄 Reset',
-        command=reset_unfollow_app,
-        width=15
-    ).pack(side='left', padx=5)
 
     ttk.Label(
         unfollow_tab,
