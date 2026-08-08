@@ -741,9 +741,7 @@ def uf_load_json_files():
         with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
             json.dump({"followers_file": f1, "following_file": f2}, f)
 
-        uf_load_progress()
         update_unfollow_ui_state()
-        refresh_unfollow_display()
 
     except Exception as e:
         messagebox.showerror("Error", f"Invalid files:\n{e}")
@@ -771,8 +769,13 @@ def uf_auto_load_last_session():
         uf_following = uf_load_following(f2)
         uf_non_followers = list(uf_following - uf_followers)
 
-        log(f"🔄 Unfollow session reloaded: {len(uf_non_followers)} non-followers", 'info')
         uf_load_progress()
+        total, remaining, removed = unfollow_progress_counts()
+        log(
+            f"🔄 Unfollow session reloaded: {total} non-followers, "
+            f"{remaining} still to process ({removed} already removed)",
+            'info'
+        )
         update_unfollow_ui_state()
 
     except Exception as e:
@@ -2204,8 +2207,8 @@ def unfollow_logic():
     finally:
         uf_stop_btn.config(state='disabled')
         # Same here: the unfollow session shares the browser, which may be gone.
+        # This also refreshes the summary counts.
         refresh_browser_state()
-        refresh_unfollow_display()
         if not stop_requested.is_set():
             reset_unfollow_progress()
 
@@ -2217,30 +2220,44 @@ def run_unfollow():
     active_threads.append(thread)
 
 
+def unfollow_progress_counts():
+    """(total, remaining, removed) for the loaded non-followers list.
+
+    Read from the saved progress, so it survives restarts: the work already done
+    in earlier sessions is the whole point of keeping that file.
+    """
+    processed = set(uf_progress.get("processed", []))
+    remaining = sum(1 for u in uf_non_followers if u not in processed)
+    return len(uf_non_followers), remaining, len(uf_progress.get("unfollowed", []))
+
+
 def update_unfollow_ui_state():
-    """Enable/disable the unfollow Start button based on browser + data readiness."""
-    try:
-        ready = driver is not None and (len(uf_non_followers) > 0 or os.path.exists(UNFOLLOW_PROGRESS_FILE))
-        uf_start_btn.config(state='normal' if ready else 'disabled')
-        if ready:
-            uf_data_label.config(text=f"🟢 {len(uf_non_followers)} non-followers ready")
-        else:
-            uf_data_label.config(text="🟡 Open the browser and load the JSON files")
-    except Exception as e:
-        logger.debug(f"update_unfollow_ui_state error: {e}")
+    """Unfollow tab's Start button and summary, in agreement with what is loaded.
 
-
-def refresh_unfollow_display():
-    """Refresh the unfollow tab's summary info."""
+    One place owns that label. A second function used to write a fuller version of
+    it, but nothing called that at startup, so a reloaded session showed only its
+    total - how much of the list had already been done stayed hidden until a round
+    finished or Stop was pressed.
+    """
     try:
         uf_load_progress()
-        remaining = len([u for u in uf_non_followers if u not in uf_progress.get("processed", [])])
-        uf_data_label.config(
-            text=f"🟢 {len(uf_non_followers)} non-followers | {remaining} to process | "
-                 f"{len(uf_progress.get('unfollowed', []))} already removed"
+        uf_start_btn.config(
+            state='normal' if driver is not None and uf_non_followers else 'disabled'
         )
+
+        if not uf_non_followers:
+            uf_data_label.config(text="🟡 Load followers.json and following.json to begin")
+            return
+
+        total, remaining, removed = unfollow_progress_counts()
+        summary = f"🟢 {total} non-followers | {remaining} to process | {removed} already removed"
+        if driver is None:
+            # The counts are worth seeing before the browser is open; say why Start
+            # is not available rather than hiding them behind that instruction.
+            summary += " | open the browser to start"
+        uf_data_label.config(text=summary)
     except Exception as e:
-        logger.debug(f"refresh_unfollow_display error: {e}")
+        logger.debug(f"update_unfollow_ui_state error: {e}")
 
 
 def reset_unfollow_app():
@@ -3149,7 +3166,7 @@ def setup_gui():
 
     uf_data_label = ttk.Label(
         uf_data_btn_frame,
-        text="🟡 Open the browser and load the JSON files",
+        text="🟡 Load followers.json and following.json to begin",
         font=('Helvetica', 9, 'italic'),
         foreground='gray'
     )
