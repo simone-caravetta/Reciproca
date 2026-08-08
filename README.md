@@ -1,3 +1,5 @@
+<img src="docs/growth.png" alt="Instagram Insights: 10,263 followers, +75.2% over 90 days" width="640">
+
 # Reciproca
 
 Desktop tool (Tkinter + Selenium) that follows and unfollows on Instagram from one
