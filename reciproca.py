@@ -37,7 +37,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 CONFIG = {
     # Extraction settings - CONSERVATIVE for background operation
     "TARGET_AUTHORS_PER_HASHTAG": 10,      # Low: Prevents detection from rapid profile switching
-    "MAX_SCROLLS": 3,                       # Low: Limits scroll actions per hashtag
+    "MAX_SCROLLS_PER_HASHTAG": 30,          # Safety ceiling, not a budget - see the loop
     "FOLLOWER_SCROLL_COUNT": 20,            # Low: Shorter scrolls = less time per profile = lower risk
     "AUTHORS_BEFORE_COOLDOWN": 2,           # Very frequent cooldowns
     "COOLDOWN_DURATION": 15,                # 15 seconds between author groups
@@ -299,6 +299,24 @@ dialog.querySelectorAll('a[href^="/"]').forEach(link => {
 return {kept, skippedFollowing, rowsWithoutButton, rowsInspected};
 """
 
+# Every post link currently on a hashtag page, as the href attribute reads in the
+# DOM. Collected in one call rather than one round trip per element: a scrolled
+# hashtag page holds hundreds of them, and the values are also how each post is
+# found again right before it is clicked, which keeps element references from
+# going stale while post dialogs open and close.
+POST_LINKS_JS = """
+const hrefs = [];
+const seen = new Set();
+document.querySelectorAll("a[href*='/p/']").forEach(a => {
+    const href = a.getAttribute('href');
+    if (href && !seen.has(href)) {
+        seen.add(href);
+        hrefs.push(href);
+    }
+});
+return hrefs;
+"""
+
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -306,7 +324,7 @@ def load_config():
     """Load config from file, fall back to defaults if not found."""
     default_config = {
         "TARGET_AUTHORS_PER_HASHTAG": 10,
-        "MAX_SCROLLS": 3,
+        "MAX_SCROLLS_PER_HASHTAG": 30,
         "FOLLOWER_SCROLL_COUNT": 20,
         "AUTHORS_BEFORE_COOLDOWN": 2,
         "COOLDOWN_DURATION": 15,
@@ -2622,29 +2640,62 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             log("⚠️ Rate limit detected during scraping - continuing anyway", 'warning')
             # Don't break - just warn and continue
 
+        # Keep working rightwards through the grid, scrolling only once the posts
+        # already on the page are used up.
+        #
+        # This used to take a fixed slice of the first six links and then scroll.
+        # Instagram appends new posts *below*, so the first six stayed the first
+        # six: the next pass found them all visited, skipped them, and scrolled
+        # again. Only six posts per hashtag were ever opened however high the
+        # scroll count went - and once a few of their authors had been scraped in
+        # an earlier session, the run gave up three authors short and fell back to
+        # reusing old ones, blaming a hashtag it had barely looked at.
+        stop_reason = "target reached"
+        unproductive_scrolls = 0
+
         while (len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
-               and scroll_count < CONFIG["MAX_SCROLLS"]
                and not stop_requested.is_set()):
 
-            posts = driver.find_elements(
-                By.XPATH,
-                "//a[contains(@href, '/p/')]"
-            )
+            hrefs = driver.execute_script(POST_LINKS_JS) or []
+            fresh = [href for href in hrefs if href not in visited_posts]
 
-            for post in posts[:6]:
-                # FIX: Check if we've reached target BEFORE processing each post
+            if not fresh:
+                if scroll_count >= CONFIG["MAX_SCROLLS_PER_HASHTAG"]:
+                    stop_reason = f"hit the {CONFIG['MAX_SCROLLS_PER_HASHTAG']}-scroll ceiling"
+                    break
+
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);"
+                )
+                time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
+                scroll_count += 1
+
+                # A scroll that loads nothing new means the hashtag has no more to
+                # show, or Instagram has stopped answering. Either way there is
+                # nothing to be gained by scrolling on.
+                if len(driver.execute_script(POST_LINKS_JS) or []) <= len(hrefs):
+                    unproductive_scrolls += 1
+                    if unproductive_scrolls >= 2:
+                        stop_reason = "the hashtag stopped loading new posts"
+                        break
+                else:
+                    unproductive_scrolls = 0
+                continue
+
+            for href in fresh:
+                # Check the target before each post, not after
                 if len(visited_authors) >= CONFIG["TARGET_AUTHORS_PER_HASHTAG"]:
                     break
 
                 if stop_requested.is_set():
                     break
 
-                try:
-                    href = post.get_attribute("href")
-                    if not href or href in visited_posts:
-                        continue
+                visited_posts.add(href)
 
-                    visited_posts.add(href)
+                try:
+                    # Found again right before use: opening and closing post
+                    # dialogs invalidates references held from earlier.
+                    post = driver.find_element(By.CSS_SELECTOR, f'a[href="{href}"]')
 
                     driver.execute_script(
                         "arguments[0].scrollIntoView();",
@@ -2668,11 +2719,11 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                         continue
 
                     if username in author_history:
-                        # Scraped in an earlier session. Hold it back and keep
-                        # looking for someone new: this is what stops every run on
-                        # the same hashtag from returning the same candidates.
+                        # Scraped in an earlier session. Hold it back and move on
+                        # to the next post: this is what stops every run on the
+                        # same hashtag from returning the same candidates.
                         deferred_authors[username] = profile_url
-                        log(f"⏳ Already scraped {username} before, looking for a new author first")
+                        log(f"⏳ Already scraped {username} before, moving on to the next post")
                         close_post()
                         continue
 
@@ -2682,23 +2733,18 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 except Exception as e:
                     log(f"❌ Post error: {e}", 'error')
 
-            driver.execute_script(
-                "window.scrollTo(0, document.body.scrollHeight);"
-            )
-            time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
-            scroll_count += 1
-
-        # Not enough unseen authors on this hashtag, so fall back to ones used
-        # before, least recently scraped first. Their profile URLs are already in
-        # hand, so there is no post to reopen.
+        # Short of the target, so fall back to authors used before, least recently
+        # scraped first. Their profile URLs are already in hand from the posts that
+        # surfaced them, so there is no post to reopen.
         if (deferred_authors
                 and len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
                 and not stop_requested.is_set()):
             reusable = order_authors_by_staleness(deferred_authors, author_history)
+            short_by = CONFIG["TARGET_AUTHORS_PER_HASHTAG"] - len(visited_authors)
             log(
-                f"♻️ Only {len(visited_authors)} unseen authors for #{kw}, "
-                f"reusing up to {CONFIG['TARGET_AUTHORS_PER_HASHTAG'] - len(visited_authors)} "
-                f"of {len(reusable)} scraped before (oldest first)",
+                f"♻️ #{kw}: {len(visited_authors)} new authors, {short_by} short "
+                f"({stop_reason}). Reusing {min(short_by, len(reusable))} of the "
+                f"{len(reusable)} held back, least recently scraped first",
                 'info'
             )
             for username in reusable:
@@ -3651,8 +3697,8 @@ def setup_gui():
 
     create_config_row(extraction_frame, 0, "TARGET_AUTHORS_PER_HASHTAG", "TARGET_AUTHORS_PER_HASHTAG",
                       "← Number of unique authors to process per hashtag")
-    create_config_row(extraction_frame, 1, "MAX_SCROLLS", "MAX_SCROLLS",
-                      "← Maximum scroll actions per hashtag page")
+    create_config_row(extraction_frame, 1, "MAX_SCROLLS_PER_HASHTAG", "MAX_SCROLLS_PER_HASHTAG",
+                      "← Safety ceiling on scrolls per hashtag (rarely reached)")
     create_config_row(extraction_frame, 2, "FOLLOWER_SCROLL_COUNT", "FOLLOWER_SCROLL_COUNT",
                       "← How many times to scroll the followers list per profile")
     create_config_row(extraction_frame, 3, "AUTHORS_BEFORE_COOLDOWN", "AUTHORS_BEFORE_COOLDOWN",
@@ -3716,7 +3762,7 @@ def setup_gui():
                            "COOLDOWN_DURATION", "HASHTAG_BREAK_DURATION", "FOLLOW_BATCH_COOLDOWN",
                            "SESSION_DURATION_MAX", "EXTRACTION_PAUSE_DURATION"]:
                     CONFIG[key] = int(value)
-                elif key in ["TARGET_AUTHORS_PER_HASHTAG", "MAX_SCROLLS", "FOLLOWER_SCROLL_COUNT",
+                elif key in ["TARGET_AUTHORS_PER_HASHTAG", "MAX_SCROLLS_PER_HASHTAG", "FOLLOWER_SCROLL_COUNT",
                              "AUTHORS_BEFORE_COOLDOWN", "FOLLOW_BATCH_SIZE", "MAX_FOLLOWS_PER_SESSION",
                              "RETRY_ATTEMPTS", "RETRY_BACKOFF"]:
                     CONFIG[key] = int(value)
@@ -3750,7 +3796,9 @@ This bot is running in development mode. Use these settings to tune behavior:
 
 EXTRACTION SETTINGS:
 • TARGET_AUTHORS_PER_HASHTAG: How many unique profile authors to process per hashtag
-• MAX_SCROLLS: Maximum scroll actions per hashtag page
+• MAX_SCROLLS_PER_HASHTAG: Safety ceiling on scrolls, not a target. Scrolling stops
+  as soon as enough new authors are found, or once the hashtag stops loading posts,
+  so this is only reached on a hashtag whose authors have nearly all been scraped
 • FOLLOWER_SCROLL_COUNT: How many scroll actions per profile's followers list
 • AUTHORS_BEFORE_COOLDOWN: After how many authors to trigger a short cooldown
 • COOLDOWN_DURATION: Seconds of cooldown between author groups
