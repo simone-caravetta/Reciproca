@@ -9,7 +9,7 @@ Browser stayed disabled, leaving no way back short of restarting the app.
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
-from _stubs import FakeRoot, FakeWidget, WebDriverException
+from _stubs import WebDriverException
 
 import reciproca as R  # noqa: E402
 
@@ -41,15 +41,8 @@ class LiveDriver:
 
 class BrowserStateTest(unittest.TestCase):
     def setUp(self):
-        R.root = FakeRoot()
-        R.log_box = FakeWidget()
-        R.browser_btn = FakeWidget()
-        R.start_btn = FakeWidget()
-        R.stop_btn = FakeWidget()
-        R.uf_start_btn = FakeWidget()
-        R.uf_data_label = FakeWidget()
+        _stubs.install_fake_ui(R)
         R.uf_non_followers = []
-        R.driver = None
 
     def assert_no_browser(self):
         self.assertEqual(R.browser_btn.state, 'normal', "Open Browser must be clickable")

@@ -12,8 +12,6 @@ import tempfile
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
-from _stubs import FakeRoot, FakeWidget
-
 import reciproca as R  # noqa: E402
 
 
@@ -23,11 +21,7 @@ class LiveDriver:
 
 class UnfollowSummaryTest(unittest.TestCase):
     def setUp(self):
-        R.root = FakeRoot()
-        R.log_box = FakeWidget()
-        R.uf_start_btn = FakeWidget()
-        R.uf_data_label = FakeWidget()
-        R.driver = None
+        _stubs.install_fake_ui(R)
         R.UNFOLLOW_PROGRESS_FILE = os.path.join(tempfile.mkdtemp(), "unfollow_progress.json")
         R.uf_non_followers = [f"user{n}" for n in range(600)]
         R.uf_progress = {"processed": [], "unfollowed": [], "skipped": []}

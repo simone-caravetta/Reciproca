@@ -43,6 +43,21 @@ for _attr in ("ttk", "scrolledtext", "messagebox", "filedialog"):
     setattr(sys.modules["tkinter"], _attr, sys.modules["tkinter." + _attr])
 sys.modules["tkinter"].END = "end"
 
+messagebox = sys.modules["tkinter.messagebox"]
+messagebox.shown = []       # (kind, title, message) for every dialog raised
+messagebox.answer = True    # what the ask* dialogs reply
+
+
+def _dialog(kind):
+    def show(title, message=None, **kwargs):
+        messagebox.shown.append((kind, title, message))
+        return messagebox.answer
+    return show
+
+
+for _kind in ("showinfo", "showwarning", "showerror", "askyesno", "askyesnocancel"):
+    setattr(messagebox, _kind, _dialog(_kind))
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
@@ -54,6 +69,13 @@ class FakeWidget:
 
     def config(self, **kwargs):
         self.settings.update(kwargs)
+
+    # Progress bars are addressed by item, as in widget['value'] = 0
+    def __setitem__(self, key, value):
+        self.settings[key] = value
+
+    def __getitem__(self, key):
+        return self.settings.get(key)
 
     @property
     def state(self):
@@ -81,3 +103,25 @@ class FakeRoot:
 
     def update_idletasks(self):
         pass
+
+
+def install_fake_ui(module):
+    """Point the module's widget globals at fakes and clear the browser state.
+
+    Central on purpose: a widget added to reciproca.py needs adding here once,
+    rather than in every test that drives the state functions.
+    """
+    module.root = FakeRoot()
+    module.log_box = FakeWidget()
+    module.browser_btn = FakeWidget()
+    module.start_btn = FakeWidget()
+    module.stop_btn = FakeWidget()
+    module.uf_browser_btn = FakeWidget()
+    module.uf_start_btn = FakeWidget()
+    module.uf_stop_btn = FakeWidget()
+    module.uf_data_label = FakeWidget()
+    module.driver = None
+    module.browser_opening.clear()
+    module.active_threads[:] = []
+    messagebox.shown.clear()
+    messagebox.answer = True

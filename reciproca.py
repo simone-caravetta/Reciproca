@@ -716,6 +716,121 @@ def uf_save_progress():
     except Exception as e:
         logger.error(f"Error saving unfollow progress: {e}")
 
+def uf_load_session():
+    """The saved unfollow session: which export files, and whose account."""
+    try:
+        if os.path.exists(UNFOLLOW_SESSION_FILE):
+            with open(UNFOLLOW_SESSION_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.error(f"Error loading unfollow session: {e}")
+    return {}
+
+
+def uf_save_session(**changes):
+    """Update the saved unfollow session, leaving the other keys as they are."""
+    session = uf_load_session()
+    session.update(changes)
+    try:
+        with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving unfollow session: {e}")
+
+
+def current_account_id():
+    """Numeric id of the Instagram account logged into the browser, or None.
+
+    Read from the ds_user_id cookie rather than from the page: no navigation, no
+    markup to match, and nothing that shifts with Instagram's layout or language.
+
+    None means the question cannot be answered right now - no browser, not logged
+    in, or sitting on another domain - never that the account has changed.
+    """
+    if driver is None:
+        return None
+    try:
+        cookie = driver.get_cookie('ds_user_id')
+        return cookie.get('value') if cookie else None
+    except WebDriverException as e:
+        logger.info(f"Could not read the logged-in account: {type(e).__name__}")
+        return None
+
+
+def uf_progress_archive(account_id):
+    """Where one account's unfollow progress waits while another one is active.
+
+    The id comes from a cookie, so it is stripped to word characters before it
+    becomes part of a filename. Instagram's ids are digits; this only rules out a
+    malformed value reaching outside the app's own directory.
+    """
+    safe_id = re.sub(r'\W', '', str(account_id))
+    return data_path(f"unfollow_progress_{safe_id}.json")
+
+
+def uf_check_account():
+    """Keep the unfollow progress with the account it was recorded against.
+
+    The progress records who has already been processed from one account's
+    following list, which means nothing on another account's. Re-exporting the
+    JSON files for the same account has to keep it - that is the normal way to
+    carry on - while a different account has to start from its own.
+
+    Nothing is deleted. Each account's record is parked under its own name and
+    brought back if that account returns: this runs by itself, and an automatic
+    action should not be able to destroy history. Reset is the button for
+    discarding on purpose.
+
+    The loaded export is cleared, though - it describes the other account, so
+    every count drawn from it would be wrong.
+    """
+    global uf_followers, uf_following, uf_non_followers
+
+    account_id = current_account_id()
+    if account_id is None:
+        return
+
+    previous_id = uf_load_session().get("account_id")
+    if previous_id == account_id:
+        return
+
+    if previous_id is None:
+        # First run able to identify the account: adopt it, keep the progress.
+        uf_save_session(account_id=account_id)
+        logger.info(f"Unfollow progress now associated with account {account_id}")
+        return
+
+    try:
+        if os.path.exists(UNFOLLOW_PROGRESS_FILE):
+            os.replace(UNFOLLOW_PROGRESS_FILE, uf_progress_archive(previous_id))
+        returning = uf_progress_archive(account_id)
+        if os.path.exists(returning):
+            os.replace(returning, UNFOLLOW_PROGRESS_FILE)
+    except Exception as e:
+        logger.error(f"Error switching unfollow progress between accounts: {e}")
+
+    uf_followers = set()
+    uf_following = set()
+    uf_non_followers = []
+    uf_save_session(account_id=account_id, followers_file=None, following_file=None)
+    uf_load_progress()
+
+    already_removed = len(uf_progress.get("unfollowed", []))
+    log("👥 Different Instagram account detected - unfollow progress switched", 'warning')
+    update_unfollow_ui_state()
+    messagebox.showinfo(
+        "Account changed",
+        "The browser is logged into a different Instagram account than the one the "
+        "unfollow progress belongs to.\n\n"
+        "That progress has been set aside under the previous account and will come "
+        "back if you log into it again - nothing was deleted.\n\n"
+        f"This account's own progress is now active ({already_removed} already "
+        "unfollowed). Load its followers.json and following.json to continue."
+    )
+
+
 def uf_load_json_files():
     """Prompt user for followers.json/following.json and compute non-followers."""
     global uf_followers, uf_following, uf_non_followers
@@ -738,8 +853,11 @@ def uf_load_json_files():
 
         log(f"✔ JSON files loaded: {len(uf_non_followers)} non-followers found", 'success')
 
-        with open(UNFOLLOW_SESSION_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"followers_file": f1, "following_file": f2}, f)
+        uf_save_session(
+            followers_file=f1,
+            following_file=f2,
+            account_id=current_account_id() or uf_load_session().get("account_id"),
+        )
 
         update_unfollow_ui_state()
 
@@ -755,8 +873,7 @@ def uf_auto_load_last_session():
         return
 
     try:
-        with open(UNFOLLOW_SESSION_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = uf_load_session()
 
         f1 = data.get("followers_file")
         f2 = data.get("following_file")
@@ -832,6 +949,9 @@ class SessionStats:
 # Global state
 stats = SessionStats(on_update=lambda: update_stats_display())
 driver = None
+# Set while the browser is being opened. Both tabs have an Open Browser button,
+# and without this a click on each would start two Chrome instances.
+browser_opening = threading.Event()
 stop_requested = threading.Event()
 active_threads = []
 # Live extraction tracking
@@ -1044,8 +1164,17 @@ def start_browser():
     ChromeDriverManager().install() can download a driver, which takes long enough
     to freeze the GUI if it runs on the Tk callback thread - the window stops
     repainting and the app looks hung.
+
+    Reached from either tab's Open Browser button, so it has to be safe to call
+    when a browser is already open or on its way.
     """
-    browser_btn.config(state='disabled')
+    if driver is not None or browser_opening.is_set():
+        return
+
+    browser_opening.set()
+    update_follow_ui_state()
+    update_unfollow_ui_state()
+
     thread = threading.Thread(target=open_browser, daemon=True)
     thread.start()
     active_threads.append(thread)
@@ -1079,8 +1208,9 @@ def open_browser():
         driver.get("https://www.instagram.com/")
         log("✅ Browser opened! Please login manually.", 'success')
 
-        update_follow_ui_state()
-        update_unfollow_ui_state()
+        # The browser is the only place that knows which account is logged in, so
+        # this is the first chance to tell whether the loaded export still matches.
+        uf_check_account()
 
     except Exception as e:
         # Deliberately broad. A frozen build has no console, so anything not caught
@@ -1094,6 +1224,8 @@ def open_browser():
             "Browser Error",
             f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details."
         )
+    finally:
+        browser_opening.clear()
         refresh_browser_state()
 
 # How often to check that the browser is still there, in milliseconds.
@@ -1119,6 +1251,11 @@ def browser_is_open():
         return False
 
 
+def can_open_browser():
+    """True when clicking Open Browser would actually do something."""
+    return driver is None and not browser_opening.is_set()
+
+
 def update_follow_ui_state():
     """Follow-tab buttons in agreement with whether a browser is actually open.
 
@@ -1127,9 +1264,8 @@ def update_follow_ui_state():
     left the app stuck until it was restarted.
     """
     try:
-        has_browser = driver is not None
-        browser_btn.config(state='disabled' if has_browser else 'normal')
-        start_btn.config(state='normal' if has_browser else 'disabled')
+        browser_btn.config(state='normal' if can_open_browser() else 'disabled')
+        start_btn.config(state='normal' if driver is not None else 'disabled')
     except Exception as e:
         logger.debug(f"update_follow_ui_state error: {e}")
 
@@ -2170,8 +2306,13 @@ def unfollow_logic():
         if not browser_is_open():
             log("❌ Browser not open!", 'error')
             handle_browser_closed()
-            messagebox.showerror("Error", "Please open the browser first (Auto Follow tab)")
+            messagebox.showerror("Error", "Please open the browser first")
             return
+
+        # The account may have been switched in the browser since the files were
+        # loaded, which would make this session write progress against the wrong
+        # following list.
+        uf_check_account()
 
         if not uf_non_followers:
             log("❌ No data loaded! Load followers.json and following.json first", 'error')
@@ -2241,6 +2382,7 @@ def update_unfollow_ui_state():
     """
     try:
         uf_load_progress()
+        uf_browser_btn.config(state='normal' if can_open_browser() else 'disabled')
         uf_start_btn.config(
             state='normal' if driver is not None and uf_non_followers else 'disabled'
         )
@@ -2261,23 +2403,55 @@ def update_unfollow_ui_state():
 
 
 def reset_unfollow_app():
-    """Reset unfollow progress/session (does not touch follow queue/history)."""
+    """Discard the unfollow progress and session (leaves the follow queue alone).
+
+    Unlike the automatic account switch, this throws the record away for good, so
+    it says exactly what is about to be lost and what is not. Everyone already
+    unfollowed on Instagram stays unfollowed - only the app's memory of it goes,
+    which means those accounts can be processed again if they turn up in a future
+    export.
+    """
     global uf_followers, uf_following, uf_non_followers, uf_progress
 
-    if messagebox.askyesno("Confirm", "Reset unfollow progress and session?"):
-        if os.path.exists(UNFOLLOW_PROGRESS_FILE):
-            os.remove(UNFOLLOW_PROGRESS_FILE)
-        if os.path.exists(UNFOLLOW_SESSION_FILE):
-            os.remove(UNFOLLOW_SESSION_FILE)
+    uf_load_progress()
+    processed = len(uf_progress.get("processed", []))
+    removed = len(uf_progress.get("unfollowed", []))
 
-        uf_followers = set()
-        uf_following = set()
-        uf_non_followers = []
-        uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+    if processed or removed:
+        warning = (
+            f"This deletes the unfollow record for this account:\n\n"
+            f"    • {processed} accounts already processed\n"
+            f"    • {removed} of them recorded as unfollowed\n"
+            f"    • the loaded followers.json / following.json\n\n"
+            f"Nobody gets followed back and nothing changes on Instagram - the "
+            f"accounts you unfollowed stay unfollowed. What is lost is the app's "
+            f"memory of it, so any of them still present in a future export will "
+            f"be processed a second time.\n\n"
+            f"This cannot be undone. Reset anyway?"
+        )
+    else:
+        warning = (
+            "There is no progress to lose yet. This clears the loaded "
+            "followers.json / following.json. Continue?"
+        )
 
-        update_unfollow_ui_state()
-        reset_unfollow_progress()
-        log("🔄 Unfollow reset complete", 'info')
+    if not messagebox.askyesno("Reset unfollow?", warning, icon='warning', default='no'):
+        log("Reset cancelled", 'info')
+        return
+
+    if os.path.exists(UNFOLLOW_PROGRESS_FILE):
+        os.remove(UNFOLLOW_PROGRESS_FILE)
+    if os.path.exists(UNFOLLOW_SESSION_FILE):
+        os.remove(UNFOLLOW_SESSION_FILE)
+
+    uf_followers = set()
+    uf_following = set()
+    uf_non_followers = []
+    uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+
+    update_unfollow_ui_state()
+    reset_unfollow_progress()
+    log(f"🔄 Unfollow reset complete ({processed} processed entries discarded)", 'info')
 
 
 def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
@@ -2929,6 +3103,7 @@ def setup_gui():
     global live_extraction_listbox, live_extraction_label
     global uf_data_label, uf_delay_min_entry, uf_delay_max_entry, uf_limit_entry
     global uf_progress_bar, uf_status_label, uf_stats_label, uf_start_btn, uf_stop_btn
+    global uf_browser_btn
 
     root = tk.Tk()
     root.title("Reciproca - Follow & Unfollow")
@@ -3216,6 +3391,14 @@ def setup_gui():
     uf_control_frame = ttk.Frame(unfollow_tab)
     uf_control_frame.pack(pady=20)
 
+    uf_browser_btn = ttk.Button(
+        uf_control_frame,
+        text='🌐 Open Browser',
+        command=start_browser,
+        width=20
+    )
+    uf_browser_btn.pack(side='left', padx=5)
+
     uf_start_btn = ttk.Button(
         uf_control_frame,
         text='🚫 Start Unfollow',
@@ -3244,7 +3427,7 @@ def setup_gui():
 
     ttk.Label(
         unfollow_tab,
-        text="Note: uses the same browser/login as the 'Auto Follow' tab. Open the browser there before starting.",
+        text="Note: shares one browser and login with the 'Auto Follow' tab - opening it here is the same as opening it there.",
         foreground='gray',
         font=('Helvetica', 8, 'italic')
     ).pack(anchor='w', pady=(0, 5))

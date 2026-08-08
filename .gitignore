@@ -14,6 +14,7 @@ scraped_authors.json
 hashtags.json
 bot_config.json
 unfollow_progress.json
+unfollow_progress_*.json
 unfollow_last_session.json
 follow_bot.log
 follow_logs_*.txt
