@@ -1,4 +1,5 @@
-<img src="docs/growth.png" alt="Instagram Insights: 10,263 followers, +75.2% over 90 days" width="640">
+<img width="1290" height="352" alt="photo_2026-08-08_20-26-15" src="https://github.com/user-attachments/assets/9b85f505-a886-4b1f-ba0a-33323665f4e8" />
+
 
 # Reciproca
 
