@@ -3156,22 +3156,6 @@ def setup_gui():
         command=clear_queue_ui
     ).pack(side='left', padx=2)
 
-    # Queue info
-    queue_info_frame = ttk.LabelFrame(queue_tab, text='Queue Info', padding=10)
-    queue_info_frame.pack(fill='x', pady=(0, 10))
-
-    ttk.Label(
-        queue_info_frame,
-        text='The queue stores users to follow across sessions.\n'
-             '• [n] is the rank: how many of the scanned hashtag authors that user\n'
-             '  already follows. It adds up across scraping sessions.\n'
-             '• Following always starts from the top of this list\n'
-             '• Users are removed from queue after being followed\n'
-             '• Use "Deep Search" mode to find users and add them to queue\n'
-             '• Use "Follow from Queue" mode to safely follow users over time',
-        justify='left'
-    ).pack(anchor='w')
-
     # ==================== SETTINGS TAB ====================
 
     # Create scrollable frame for settings
