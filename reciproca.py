@@ -94,6 +94,7 @@ def data_path(filename):
 QUEUE_FILE = data_path("follow_queue.json")
 FOLLOWED_FILE = data_path("followed_history.json")
 FREQUENCIES_FILE = data_path("user_frequencies.json")
+AUTHORS_FILE = data_path("scraped_authors.json")
 HASHTAGS_FILE = data_path("hashtags.json")
 CONFIG_FILE = data_path("bot_config.json")
 UNFOLLOW_PROGRESS_FILE = data_path("unfollow_progress.json")
@@ -582,6 +583,48 @@ def save_frequencies(frequencies):
     except Exception as e:
         logger.error(f"Error saving frequencies: {e}")
         return False
+
+def load_author_history():
+    """Authors whose followers have been scraped, mapped to when that last happened.
+
+    A hashtag page shows the same posts at the top session after session, so
+    without this the same handful of authors get scraped every time and the
+    candidates found never change.
+    """
+    try:
+        if os.path.exists(AUTHORS_FILE):
+            with open(AUTHORS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.error(f"Error loading author history: {e}")
+    return {}
+
+
+def save_author_history(history):
+    """Save the scraped-authors history."""
+    try:
+        with open(AUTHORS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving author history: {e}")
+        return False
+
+
+def order_authors_by_staleness(usernames, history):
+    """Authors ordered by who is most worth scraping next.
+
+    Never scraped comes first, always. The rest follow least recently scraped
+    first, so an author left alone for several sessions comes back up before one
+    used yesterday, and repeated runs on the same hashtags rotate through
+    different authors instead of always taking whoever the first posts belong to.
+
+    Timestamps are ISO 8601, which sorts chronologically as plain text.
+    """
+    return sorted(usernames, key=lambda u: (u in history, history.get(u) or "", u))
+
 
 def load_hashtags():
     """Load hashtags from file."""
@@ -2156,6 +2199,84 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     total_authors_processed = 0
     throttle_cooldown_count = 0  # Track consecutive low-extraction authors
 
+    # Authors scraped in earlier sessions, and the ones the current hashtag is
+    # holding back in case it cannot reach its target with unseen authors.
+    author_history = load_author_history()
+    visited_authors = set()
+    deferred_authors = {}
+
+    def scrape_author(username, profile_url, hashtag):
+        """Extract one author's followers and record that the author was used.
+
+        Leaves the browser on the window it was called from. The caller owns the
+        post dialog, if there is one - only the fresh-author path opens one.
+        """
+        nonlocal author_count, total_authors_processed, throttle_cooldown_count
+        global last_scrape_frequencies, live_frequencies
+
+        visited_authors.add(username)
+        author_count += 1
+        total_authors_processed += 1
+        log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
+
+        driver.execute_script("window.open(arguments[0]);", profile_url)
+        driver.switch_to.window(driver.window_handles[-1])
+        time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
+
+        if open_followers_popup():
+            users = extract_users_from_followers(
+                current_hashtag=hashtag,
+                author_num=author_count,
+                total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
+                author_name=username
+            )
+            all_users.extend(users)
+
+            # Update frequencies incrementally for this author
+            current_frequencies.update(users)
+            last_scrape_frequencies = previous_frequencies + current_frequencies
+            save_frequencies(last_scrape_frequencies)
+
+            log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
+
+            # Update live extraction display for real-time feedback
+            live_extracted_users.extend(users)
+            live_frequencies = current_frequencies.copy()  # Mirror current frequencies
+            update_live_extraction_display()
+
+            # Skip authors with very high follower counts to avoid throttling
+            if len(users) < 5:
+                log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
+
+            # Anti-throttling: detect low extraction as rate limiting signal
+            if len(users) < 25:
+                throttle_cooldown_count += 1
+                if throttle_cooldown_count >= 2:
+                    cooldown = random.uniform(8, 12)
+                    log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
+                    time.sleep(cooldown)
+                    throttle_cooldown_count = 0  # Reset after cooldown
+            else:
+                throttle_cooldown_count = 0  # Reset on good extraction
+
+        driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+
+        # Mark the author used even if the popup never opened. Retrying next
+        # session would hit the same wall, and the point of the rotation is to
+        # move on to someone who has not been tried.
+        author_history[username] = datetime.now().isoformat()
+        save_author_history(author_history)
+
+        # Anti-throttling: frequent cooldowns for safety
+        if author_count % CONFIG["AUTHORS_BEFORE_COOLDOWN"] == 0:
+            cooldown = CONFIG["COOLDOWN_DURATION"] + random.uniform(0, 5)
+            log(f"🛡️ Safety cooldown: {cooldown:.0f}s after {author_count} authors...", 'info')
+            time.sleep(cooldown)
+
+        # Random delay between authors - safer range
+        time.sleep(random.uniform(4, 8))
+
     total_hashtags = len(hashtags)
     for hashtag_idx, kw in enumerate(hashtags, 1):
         if stop_requested.is_set():
@@ -2171,7 +2292,8 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             current_hashtag=kw
         )
 
-        visited_authors = set()
+        visited_authors.clear()
+        deferred_authors.clear()
         visited_posts = set()
         scroll_count = 0
         author_count = 0
@@ -2223,73 +2345,22 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     username = profile_url.rstrip("/").split("/")[-1]
 
-                    if username in visited_authors:
+                    if username in visited_authors or username in deferred_authors:
                         log(f"⏭️ Skip duplicate: {username}", 'warning')
                         close_post()
                         continue
 
-                    visited_authors.add(username)
-                    author_count += 1
-                    total_authors_processed += 1
-                    log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
+                    if username in author_history:
+                        # Scraped in an earlier session. Hold it back and keep
+                        # looking for someone new: this is what stops every run on
+                        # the same hashtag from returning the same candidates.
+                        deferred_authors[username] = profile_url
+                        log(f"⏳ Already scraped {username} before, looking for a new author first")
+                        close_post()
+                        continue
 
-                    driver.execute_script(
-                        "window.open(arguments[0]);",
-                        profile_url
-                    )
-                    driver.switch_to.window(driver.window_handles[-1])
-                    time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
-
-                    users = []
-                    if open_followers_popup():
-                        users = extract_users_from_followers(
-                            current_hashtag=kw,
-                            author_num=author_count,
-                            total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
-                            author_name=username
-                        )
-                        all_users.extend(users)
-
-                        # Update frequencies incrementally for this author
-                        current_frequencies.update(users)
-                        last_scrape_frequencies = previous_frequencies + current_frequencies
-                        save_frequencies(last_scrape_frequencies)
-
-                        log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
-
-                        # Update live extraction display for real-time feedback
-                        live_extracted_users.extend(users)
-                        live_frequencies = current_frequencies.copy()  # Mirror current frequencies
-                        update_live_extraction_display()
-
-                        # Skip authors with very high follower counts to avoid throttling
-                        if len(users) < 5:
-                            log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
-
-                        # Anti-throttling: detect low extraction as rate limiting signal
-                        if len(users) < 25:
-                            throttle_cooldown_count += 1
-                            if throttle_cooldown_count >= 2:
-                                cooldown = random.uniform(8, 12)
-                                log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
-                                time.sleep(cooldown)
-                                throttle_cooldown_count = 0  # Reset after cooldown
-                        else:
-                            throttle_cooldown_count = 0  # Reset on good extraction
-
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
+                    scrape_author(username, profile_url, kw)
                     close_post()
-
-                    # Anti-throttling: frequent cooldowns for safety
-                    if author_count % CONFIG["AUTHORS_BEFORE_COOLDOWN"] == 0:
-                        cooldown = CONFIG["COOLDOWN_DURATION"] + random.uniform(0, 5)
-                        log(f"🛡️ Safety cooldown: {cooldown:.0f}s after {author_count} authors...", 'info')
-                        time.sleep(cooldown)
-
-                    # Random delay between authors - safer range
-                    delay = random.uniform(4, 8)
-                    time.sleep(delay)
 
                 except Exception as e:
                     log(f"❌ Post error: {e}", 'error')
@@ -2299,6 +2370,28 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             )
             time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
             scroll_count += 1
+
+        # Not enough unseen authors on this hashtag, so fall back to ones used
+        # before, least recently scraped first. Their profile URLs are already in
+        # hand, so there is no post to reopen.
+        if (deferred_authors
+                and len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
+                and not stop_requested.is_set()):
+            reusable = order_authors_by_staleness(deferred_authors, author_history)
+            log(
+                f"♻️ Only {len(visited_authors)} unseen authors for #{kw}, "
+                f"reusing up to {CONFIG['TARGET_AUTHORS_PER_HASHTAG'] - len(visited_authors)} "
+                f"of {len(reusable)} scraped before (oldest first)",
+                'info'
+            )
+            for username in reusable:
+                if (len(visited_authors) >= CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
+                        or stop_requested.is_set()):
+                    break
+                try:
+                    scrape_author(username, deferred_authors[username], kw)
+                except Exception as e:
+                    log(f"❌ Author error for {username}: {e}", 'error')
 
         log(f"🎯 Authors collected: {len(visited_authors)}")
 

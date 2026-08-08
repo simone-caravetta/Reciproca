@@ -43,6 +43,7 @@ sys.modules["tkinter"].END = "end"
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import reciproca as R  # noqa: E402
+from reciproca import order_authors_by_staleness  # noqa: E402
 
 
 class QueueRankingTest(unittest.TestCase):
@@ -138,6 +139,58 @@ class FrequencyAccumulationTest(unittest.TestCase):
         R.save_frequencies(previous + R.Counter(["alice", "alice", "carol"]))
         self.assertEqual(
             dict(R.load_frequencies()), {"alice": 7, "bob": 1, "carol": 1}
+        )
+
+
+class AuthorRotationTest(unittest.TestCase):
+    """A hashtag page shows the same posts at the top every session, so without a
+    rotation the same authors get scraped forever and the candidates never
+    change. Never-scraped authors win outright; the rest go least recently
+    scraped first, so one left alone for a while climbs back up."""
+
+    def test_unseen_authors_come_before_every_seen_one(self):
+        history = {"old": "2026-01-01T00:00:00", "fresh": "2026-08-01T00:00:00"}
+        self.assertEqual(
+            order_authors_by_staleness(["fresh", "never", "old"], history),
+            ["never", "old", "fresh"],
+        )
+
+    def test_seen_authors_go_oldest_first(self):
+        history = {
+            "yesterday": "2026-08-07T09:00:00",
+            "last_month": "2026-07-05T09:00:00",
+            "this_morning": "2026-08-08T07:00:00",
+        }
+        self.assertEqual(
+            order_authors_by_staleness(
+                ["this_morning", "yesterday", "last_month"], history
+            ),
+            ["last_month", "yesterday", "this_morning"],
+        )
+
+    def test_repeated_sessions_rotate_instead_of_repeating(self):
+        """Two authors, one slot per session: each session takes the other one."""
+        history = {}
+        picked = []
+        for session in range(4):
+            chosen = order_authors_by_staleness(["ann", "bea"], history)[0]
+            picked.append(chosen)
+            history[chosen] = f"2026-08-0{session + 1}T00:00:00"
+        self.assertEqual(picked, ["ann", "bea", "ann", "bea"])
+
+    def test_several_unseen_authors_keep_a_stable_order(self):
+        self.assertEqual(
+            order_authors_by_staleness(["carol", "alice", "bob"], {}),
+            ["alice", "bob", "carol"],
+        )
+
+    def test_a_missing_timestamp_is_treated_as_the_oldest(self):
+        """An entry written by a version that stored no timestamp must still be
+        reusable, and go first among the seen rather than being skipped."""
+        history = {"undated": None, "dated": "2026-01-01T00:00:00"}
+        self.assertEqual(
+            order_authors_by_staleness(["dated", "undated"], history),
+            ["undated", "dated"],
         )
 
 

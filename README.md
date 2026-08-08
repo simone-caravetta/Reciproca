@@ -121,7 +121,7 @@ Node and jsdom are only needed for this test, not to run the app.
 
 ## Generated files (git-ignored)
 
-`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.
+`chrome_profile/`, `follow_queue.json`, `followed_history.json`, `user_frequencies.json`, `scraped_authors.json`, `hashtags.json`, `bot_config.json`, `unfollow_progress.json`, `unfollow_last_session.json`, and various logs — see `.gitignore`.
 
 ## License
 
