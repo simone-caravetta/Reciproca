@@ -4,12 +4,17 @@ Desktop tool (Tkinter + Selenium) that follows and unfollows on Instagram from o
 tabbed GUI: **Auto Follow** (from a saved queue, or by hashtag search), **Follow
 Queue**, **Unfollow** (people who don't follow you back), **Settings** and **Logs**.
 
-## ⚠️ Important notice
+## Before you start
 
-This tool automates Instagram through a Selenium-controlled browser. That
-**violates Instagram's Terms of Service** and can get the account restricted or
-banned. Use it at your own risk, with an account you are willing to lose, and keep
-the delays and limits conservative.
+Reciproca drives Instagram through a Selenium-controlled browser, which goes against
+Instagram's Terms of Service. In practice that may mean a temporary action block, and
+in some cases the account could end up restricted.
+
+It is a project for tinkering with browser automation and seeing how far careful
+pacing gets you, so try it for fun on an account you would not mind losing, on your
+own content and your own audience. The defaults are deliberately slow — leaving them
+alone, or making them slower, keeps the whole thing closer to what somebody could
+plausibly do by hand, which is the point.
 
 ## Setup
 
