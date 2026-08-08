@@ -402,19 +402,64 @@ def save_queue(queue):
         logger.error(f"Error saving queue: {e}")
         return False
 
+def queue_username(item):
+    """Username of a queue entry, whichever format it is stored in.
+
+    Entries are dicts carrying metadata, but queues written by older versions are
+    plain username strings. One accessor instead of an isinstance check at every
+    call site.
+    """
+    if isinstance(item, dict):
+        return item.get('username')
+    return item
+
+
+def ranking_frequencies():
+    """Frequencies the queue is ranked by, read from disk on first use.
+
+    A user's frequency is how many of the scanned hashtag authors that user
+    follows: a frequency of 6 means this candidate already follows 6 accounts
+    posting under the searched tags, which is why it predicts a follow back.
+    The count accumulates across scraping sessions, so it is a property of the
+    candidate and not of the session that happened to find them.
+    """
+    global last_scrape_frequencies
+    if not last_scrape_frequencies:
+        last_scrape_frequencies = load_frequencies()
+    return last_scrape_frequencies
+
+
+def rank_queue(queue, frequencies=None):
+    """Queue entries ordered by rank, highest first.
+
+    Returns a list of (username, rank, item) triples.
+
+    This is the single definition of the queue's order. The listbox draws it and
+    follow_from_queue consumes it, so the account followed next is always the
+    top one on screen. They used to order the queue separately - the display
+    sorted by rank while the follow loop walked the file in insertion order -
+    which made the ranking decorative: it was shown but never acted on.
+
+    Ties break on username so the order stays stable between redraws.
+    """
+    if frequencies is None:
+        frequencies = ranking_frequencies()
+
+    ranked = []
+    for item in queue:
+        username = queue_username(item)
+        if username:
+            ranked.append((username, frequencies.get(username, 0), item))
+
+    ranked.sort(key=lambda entry: (-entry[1], entry[0]))
+    return ranked
+
+
 def add_to_queue(usernames):
     """Add usernames to queue, avoiding duplicates and already followed users."""
     queue = load_queue()
     # Add only new usernames (not already in queue and not already followed)
-    existing_in_queue = set()
-
-    # Extract usernames from queue (handle both list and dict formats)
-    if queue and isinstance(queue[0], dict):
-        # New format with metadata
-        existing_in_queue = {item['username'] for item in queue if isinstance(item, dict) and 'username' in item}
-    else:
-        # Old format - just usernames
-        existing_in_queue = set(queue)
+    existing_in_queue = {queue_username(item) for item in queue}
 
     new_users = []
 
@@ -433,7 +478,10 @@ def add_to_queue(usernames):
         }
         queue.append(queue_item)
 
-    save_queue(queue)
+    # Persist in rank order, so the file matches what the listbox shows and the
+    # order the follow loop will consume. Plain appending buried a high-ranking
+    # user from this batch behind every lower-ranked user already queued.
+    save_queue([item for _, _, item in rank_queue(queue)])
     return len(new_users), len(queue)
 
 def remove_from_queue(username):
@@ -442,16 +490,7 @@ def remove_from_queue(username):
     if not queue:
         return False
 
-    # Handle both old format (list of usernames) and new format (list of dicts)
-    if queue and isinstance(queue[0], dict):
-        # New format
-        queue = [item for item in queue if item.get('username') != username]
-    else:
-        # Old format
-        if username in queue:
-            queue.remove(username)
-
-    save_queue(queue)
+    save_queue([item for item in queue if queue_username(item) != username])
     return True
 
 def clear_queue():
@@ -466,14 +505,11 @@ def validate_queue():
     if not queue:
         return 0, 0
 
-    # Handle both old format (list of usernames) and new format (list of dicts)
-    is_new_format = queue and isinstance(queue[0], dict)
-
     # Remove duplicates while preserving order
     seen = set()
     unique_queue = []
     for item in queue:
-        username = item['username'] if is_new_format else item
+        username = queue_username(item)
         if username not in seen:
             seen.add(username)
             unique_queue.append(item)
@@ -482,7 +518,7 @@ def validate_queue():
     validated_queue = []
     removed_count = 0
     for item in unique_queue:
-        username = item['username'] if is_new_format else item
+        username = queue_username(item)
         if is_already_followed(username):
             removed_count += 1
             logger.debug(f"Queue validation: Removed already followed user {username}")
@@ -754,6 +790,11 @@ active_threads = []
 # Live extraction tracking
 live_extracted_users = []  # Track users as they're extracted
 live_frequencies = Counter()  # Track frequencies in real-time
+# Frequencies the queue is ranked by. Read lazily via ranking_frequencies() so
+# startup does not touch the disk before the GUI exists.
+last_scrape_frequencies = None
+# Usernames currently drawn in the queue listbox, row by row
+displayed_queue_usernames = []
 
 # Unfollow state
 uf_stats = SessionStats(on_update=lambda: update_unfollow_stats_display())
@@ -1022,17 +1063,18 @@ def stop_bot():
         # Check if we have live extraction data (indicating extraction was in progress)
         global live_extracted_users
         if live_extracted_users:
-            # Reload frequencies from file to get the latest incremental data
-            current_freqs = load_frequencies()
-            if current_freqs:
-                ranked_users = [u for u, _ in current_freqs.most_common()]
-                if ranked_users:
-                    new_count, total_count = add_to_queue(ranked_users)
-                    log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
-                    # Update global frequencies
-                    global last_scrape_frequencies
-                    last_scrape_frequencies = current_freqs
-                    refresh_queue_display()
+            # Only this session's finds, best first. The frequencies file accumulates
+            # across sessions, so ranking it whole would queue the entire history.
+            global last_scrape_frequencies
+            last_scrape_frequencies = load_frequencies()
+            ranked_users = [
+                username for username, _, _ in
+                rank_queue(list(dict.fromkeys(live_extracted_users)), last_scrape_frequencies)
+            ]
+            if ranked_users:
+                new_count, total_count = add_to_queue(ranked_users)
+                log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
+                refresh_queue_display()
         else:
             # If we're stopping during follow (not extraction), just validate the queue
             log("🔄 Validating queue consistency after stop...", 'info')
@@ -1773,15 +1815,17 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
     skipped_already_followed = 0
     batch_count = 0
 
-    # Extract usernames from queue items (handle both formats)
-    usernames = []
-    for item in users_to_follow:
-        if isinstance(item, dict):
-            usernames.append(item['username'])
-        else:
-            usernames.append(item)
+    # Consume in rank order, highest first - the same order rank_queue() gives the
+    # listbox, so the next account followed is the top one on screen. Ranking here
+    # rather than at the call sites means neither queue mode nor deep search can
+    # bypass it.
+    ranked = rank_queue(users_to_follow)
+    usernames = [username for username, _, _ in ranked]
 
     log(f"📋 Following from queue: {len(usernames)} users available")
+    if ranked:
+        preview = ", ".join(f"{u} [{rank}]" for u, rank, _ in ranked[:10])
+        log(f"🏆 Follow order by rank: {preview}{' ...' if len(ranked) > 10 else ''}", 'info')
     log(f"🎯 Target: {limit} follows this session")
     log(f"🛡️ Safety: {CONFIG['FOLLOW_BATCH_SIZE']} follows per batch, {CONFIG['FOLLOW_BATCH_COOLDOWN']//60}min cooldown between batches")
 
@@ -2092,9 +2136,6 @@ def reset_unfollow_app():
         log("🔄 Unfollow reset complete", 'info')
 
 
-# Global variable to store user frequencies from last scrape - load from file on startup
-last_scrape_frequencies = load_frequencies()
-
 def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     """Scrape users from hashtags and optionally add to queue."""
     global last_scrape_frequencies, live_extracted_users, live_frequencies
@@ -2103,8 +2144,15 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     live_extracted_users = []
     live_frequencies = Counter()
 
+    # Ranks earned in earlier scraping sessions. A rank counts how many scanned
+    # authors a candidate follows, so a second session adds to that count rather
+    # than replacing it - this counter starts from what is already on disk and
+    # every save writes the sum. Starting from zero used to wipe the rank of
+    # every candidate found previously, leaving them at 0 and unrankable.
+    previous_frequencies = load_frequencies()
+
     all_users = []
-    current_frequencies = Counter()  # Track frequencies incrementally
+    current_frequencies = Counter()  # This session's contribution only
     total_authors_processed = 0
     throttle_cooldown_count = 0  # Track consecutive low-extraction authors
 
@@ -2204,8 +2252,8 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                         # Update frequencies incrementally for this author
                         current_frequencies.update(users)
-                        last_scrape_frequencies = current_frequencies
-                        save_frequencies(current_frequencies)
+                        last_scrape_frequencies = previous_frequencies + current_frequencies
+                        save_frequencies(last_scrape_frequencies)
 
                         log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
 
@@ -2260,12 +2308,14 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
             log(f"☕ Safety break between hashtags: {break_time:.0f}s...", 'info')
             time.sleep(break_time)
 
-    # Rank users by frequency (use the incrementally built counter)
+    # Which users to offer for the queue: this session's finds, best first. The
+    # accumulated counter is for ranking the queue, not for deciding what to add,
+    # so a long history cannot crowd out what was just found.
     ranked_users = [u for u, _ in current_frequencies.most_common()]
 
     # Ensure global frequencies are up to date
-    last_scrape_frequencies = current_frequencies
-    save_frequencies(current_frequencies)
+    last_scrape_frequencies = previous_frequencies + current_frequencies
+    save_frequencies(last_scrape_frequencies)
 
     log(f"\n🏆 Total unique users found: {len(ranked_users)}", 'success')
 
@@ -2360,7 +2410,7 @@ def follow_logic():
             # Ask if user wants to add to queue or follow directly
             # Show frequency stats in the dialog
             top_score = ranked_users[0] if ranked_users else None
-            top_freq = last_scrape_frequencies.get(top_score, 0) if top_score else 0
+            top_freq = ranking_frequencies().get(top_score, 0) if top_score else 0
 
             result = messagebox.askyesnocancel(
                 "Search Complete",
@@ -2458,53 +2508,28 @@ def clear_hashtags():
 # ---------------------------
 def refresh_queue_display():
     """Refresh the queue listbox display with frequency rankings."""
+    global displayed_queue_usernames
+
     queue_listbox.delete(0, tk.END)
     # Validate queue before displaying to ensure consistency
     validate_queue()
-    queue = load_queue()
+    ranked = rank_queue(load_queue())
 
-    # Extract usernames from queue (handle both formats)
-    if queue and isinstance(queue[0], dict):
-        # New format
-        queue_usernames = [item['username'] for item in queue]
-    else:
-        # Old format
-        queue_usernames = queue
+    # Remember what each row holds, so acting on a selection never has to
+    # reconstruct the ordering and cannot disagree with what is on screen.
+    displayed_queue_usernames = [username for username, _, _ in ranked[:100]]
 
-    # Get frequencies from last scrape if available, otherwise load from file
-    global last_scrape_frequencies
-    frequencies = last_scrape_frequencies
-    if not frequencies:
-        frequencies = load_frequencies()
-        last_scrape_frequencies = frequencies
+    for user, rank, _ in ranked[:100]:  # Show first 100
+        queue_listbox.insert(tk.END, f"[{rank}] {user}" if rank > 0 else user)
 
-    # Sort queue by frequency (highest first) if frequencies exist
-    if frequencies and queue_usernames:
-        # Create list of (user, frequency) tuples
-        queue_with_freq = [(user, frequencies.get(user, 0)) for user in queue_usernames]
-        # Sort by frequency descending, then by username
-        queue_with_freq.sort(key=lambda x: (-x[1], x[0]))
-    else:
-        queue_with_freq = [(user, 0) for user in queue_usernames]
+    if len(ranked) > 100:
+        queue_listbox.insert(tk.END, f"... and {len(ranked) - 100} more")
 
-    # Display users with their rank/frequency
-    displayed_count = 0
-    for user, freq in queue_with_freq[:100]:  # Show first 100
-        if freq > 0:
-            display_text = f"[{freq}] {user}"
-        else:
-            display_text = user
-        queue_listbox.insert(tk.END, display_text)
-        displayed_count += 1
-
-    if len(queue_with_freq) > 100:
-        queue_listbox.insert(tk.END, f"... and {len(queue_with_freq) - 100} more")
-
-    queue_count_label.config(text=f"Queue: {len(queue_usernames)} users")
+    queue_count_label.config(text=f"Queue: {len(ranked)} users")
 
     # Also update main tab info
     try:
-        main_queue_info.config(text=f"Queue: {len(queue_usernames)} users waiting")
+        main_queue_info.config(text=f"Queue: {len(ranked)} users waiting")
     except:
         pass  # Might not exist yet
 
@@ -2571,28 +2596,11 @@ def remove_from_queue_ui():
     if selection:
         idx = selection[0]
 
-        # Get the sorted queue with frequencies
-        queue = load_queue()
-        global last_scrape_frequencies
-        frequencies = last_scrape_frequencies
-        if not frequencies:
-            frequencies = load_frequencies()
-            last_scrape_frequencies = frequencies
-
-        # Extract usernames from queue (handle both formats)
-        if queue and isinstance(queue[0], dict):
-            queue_usernames = [item['username'] for item in queue]
-        else:
-            queue_usernames = queue
-
-        if frequencies and queue_usernames:
-            queue_with_freq = [(user, frequencies.get(user, 0)) for user in queue_usernames]
-            queue_with_freq.sort(key=lambda x: (-x[1], x[0]))
-        else:
-            queue_with_freq = [(user, 0) for user in queue_usernames]
-
-        if idx < len(queue_with_freq):
-            username = queue_with_freq[idx][0]
+        # Read the row straight off what was drawn. Rebuilding the ordering here
+        # could disagree with the listbox, and the bound also guards the trailing
+        # "... and N more" row, which is not a user.
+        if idx < len(displayed_queue_usernames):
+            username = displayed_queue_usernames[idx]
             remove_from_queue(username)
             refresh_queue_display()
             log(f"Removed {username} from queue", 'info')
@@ -2618,11 +2626,8 @@ def import_queue_from_file():
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    # Handle both old format (list of usernames) and new format (list of dicts)
-                    if data and isinstance(data[0], dict):
-                        usernames = [item['username'] for item in data if isinstance(item, dict) and 'username' in item]
-                    else:
-                        usernames = data
+                    # Accepts an exported queue (dicts) or a plain list of usernames
+                    usernames = [u for u in (queue_username(item) for item in data) if u]
                 elif isinstance(data, dict):
                     usernames = list(data.keys())
         else:
@@ -2649,11 +2654,7 @@ def export_queue_to_file():
 
     try:
         queue = load_queue()
-        # Extract usernames for export (handle both formats)
-        if queue and isinstance(queue[0], dict):
-            usernames = [item['username'] for item in queue]
-        else:
-            usernames = queue
+        usernames = [queue_username(item) for item in queue]
 
         if filepath.endswith('.json'):
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -3162,6 +3163,9 @@ def setup_gui():
     ttk.Label(
         queue_info_frame,
         text='The queue stores users to follow across sessions.\n'
+             '• [n] is the rank: how many of the scanned hashtag authors that user\n'
+             '  already follows. It adds up across scraping sessions.\n'
+             '• Following always starts from the top of this list\n'
              '• Users are removed from queue after being followed\n'
              '• Use "Deep Search" mode to find users and add them to queue\n'
              '• Use "Follow from Queue" mode to safely follow users over time',
