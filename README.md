@@ -51,6 +51,11 @@ with the Instagram account it was recorded against: export again and load the ne
 files to carry on. **Reset** discards it on purpose, and says what it will delete
 first.
 
+## Coming soon
+
+- Semantic ranking of candidates during Deep Search, powered by AI
+- More Instagram interface languages (see below)
+
 ## Instagram language support
 
 Instagram renders its interface in the account's own language, so Reciproca matches
