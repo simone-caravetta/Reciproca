@@ -208,12 +208,9 @@ def is_follow_button(text):
 def parse_count(text):
     """A count out of Instagram's profile header as a number, or None.
 
-    Accepts the shapes Instagram renders: plain digits, thousands separated by
-    either , or . depending on locale, and abbreviations such as 12.3K, 1,2K, 5M.
-
-    A separator means a decimal point only when a multiplier follows it, which is
-    what tells "1.234" (one thousand two hundred and thirty four) from "1.2K"
-    (one thousand two hundred).
+    Accepts plain digits, thousands separated by , . or a space depending on locale,
+    and abbreviations such as 12.3K, 1,2K, 5M. A separator is a decimal point only
+    when a multiplier follows: "1.234" is 1234, "1.2K" is 1200.
     """
     if not text:
         return None
@@ -244,13 +241,9 @@ def parse_count(text):
 def bot_rejection_reason(posts, followers, following):
     """Why a profile looks automated, as a phrase for the log, or None to allow it.
 
-    An account with nothing posted, almost nobody following it, or following
-    thousands while followed by few, is not going to reciprocate a follow.
-
-    Any count that could not be read arrives as None and takes no part in the
-    decision. A missing signal must never count as a bad one: Instagram changes
-    its markup regularly, and a reading that quietly fails has to let everyone
-    through rather than reject everyone.
+    A count that could not be read arrives as None and takes no part in the decision:
+    a missing signal must never count as a bad one, or a change in Instagram's markup
+    would start rejecting everybody.
     """
     if posts is not None and posts < CONFIG["BOT_MIN_POSTS"]:
         return f"{posts} posts"
@@ -2240,9 +2233,7 @@ def read_profile_stats():
 
 def profile_bot_reason():
     """Why the profile in the browser looks automated, or None to follow it."""
-    # The header shell can render before the counts arrive, so give them a moment
-    # rather than reading zeroes off a half-built page. Costs nothing when the
-    # numbers are already there, which is the normal case.
+    # The header can render before the counts arrive, so give them a moment.
     for attempt in range(3):
         posts, followers, following = read_profile_stats()
         if None not in (posts, followers, following):
@@ -2256,10 +2247,8 @@ def profile_bot_reason():
         if value is None
     ]
 
-    # Fail open - but never quietly. A count that cannot be read takes no part in the
-    # decision, so staying silent would look exactly like a profile that passed the
-    # check, and a partly unreadable header would disable part of the filter without
-    # anyone noticing. This is the only way to find out Instagram changed its markup.
+    # Fail open, but never quietly: an unread count takes no part in the decision, so
+    # silence here is indistinguishable from a profile that passed.
     if len(missing) == 3:
         log("⚠️ Could not read any of this profile's counts - bot filter skipped", 'warning')
         return None
@@ -2313,14 +2302,9 @@ def follow_user(username, delay_min, delay_max):
             return False, "button_error"
 
         if status == "follow" and btn:
-            # The counts only exist on the profile, and the browser is already on it,
-            # so this is the one place the check is free. It is a gate rather than a
-            # filter: by now the account is in the queue, and this is what stops it
-            # being followed.
-            #
-            # Checked here rather than on arrival so that a profile already followed,
-            # or one with no button to press, is settled as what it is - it needs no
-            # counts, and would otherwise be recorded as filtered instead.
+            # Checked here rather than on arrival: a profile already followed, or one
+            # with no button, is settled without needing its counts, and would
+            # otherwise be recorded as filtered instead.
             if CONFIG["BOT_FILTER_ENABLED"]:
                 bot_reason = profile_bot_reason()
                 if bot_reason:
