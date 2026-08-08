@@ -5,6 +5,11 @@
 Desktop tool (Python, Tkinter, Selenium) for **testing growth strategies** on your own
 Instagram account and **managing** the follow relationships they produce.
 
+Everything runs on your own machine: no account to create, no API key, no third-party
+service in the middle. You log into Instagram yourself, in an ordinary Chrome window
+the tool drives, and the session stays in a browser profile next to the app — your
+password is never typed into Reciproca and never leaves your computer.
+
 The approach is reciprocal growth. Reciproca looks for accounts that already follow
 several people posting under your hashtags — a sign they follow within your niche and
 might follow back — ranks candidates by how strong that signal is, and works down the
