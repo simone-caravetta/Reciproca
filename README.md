@@ -36,6 +36,20 @@ Requires Google Chrome to be installed: `webdriver-manager` automatically downlo
 
 When the list runs out, request a fresh export and load it: progress is kept as long as the browser is logged into the same account. Log into a different one and Reciproca sets that record aside under the previous account and picks up the new account's own — switching back restores it. **Reset** discards the current account's record on purpose, and says what it is about to delete before doing it.
 
+### Bot filter
+
+Profiles that will not reciprocate — nothing posted, almost no followers, following
+thousands — are rejected before being followed and dropped from the queue. The
+thresholds are in **Settings → 🤖 Bot Filter**; set `BOT_FILTER_ENABLED` to 0 to turn
+the check off.
+
+The counts live on the profile page and not in the followers list a candidate is
+found in, so the check runs at follow time, where the browser is already on the
+profile and it costs nothing extra. It therefore does not keep bots out of the
+queue — it stops them being followed. A profile whose counts cannot be read is
+followed anyway, with a warning in the log, so a change in Instagram's markup cannot
+quietly block every follow.
+
 ### Coming Soon...
 - Semantic ranking of users during the Deep Search phase, powered by AI
 - Multi-language support (see below)
@@ -47,8 +61,8 @@ match button and warning text per locale. **Currently supported: English and Ita
 
 All locale strings live in one block at the top of `reciproca.py`
 (`FOLLOWING_BUTTON_MARKERS`, `FOLLOW_BUTTON_MARKERS`, `UNFOLLOW_CONFIRM_MARKERS`,
-`CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a language means editing
-that block only — no call site needs to change.
+`POSTS_LABEL_MARKERS`, `CLOSE_BUTTON_LABELS`, `RATE_LIMIT_MARKERS`), so adding a
+language means editing that block only — no call site needs to change.
 
 ## Building a standalone Windows executable
 
@@ -109,8 +123,9 @@ Notes:
 
 ## Tests
 
-The Python tests cover the queue's ranking, the rotation of scraped authors and
-the browser-state handling. They need no browser and no extra packages:
+The Python tests cover the queue's ranking, the rotation of scraped authors, the
+bot filter's parsing and verdict, and the browser-state handling. They need no
+browser and no extra packages:
 
 ```bash
 python -m unittest discover -s tests -t tests

@@ -59,6 +59,13 @@ CONFIG = {
     "RETRY_BACKOFF": 3,                     # Longer backoff between retries
     "EXTRACTION_PAUSE_DURATION": 2,         # Hours between extraction sessions
 
+    # Bot filtering - checked on the profile, right before following it
+    "BOT_FILTER_ENABLED": 1,                # 0 turns the whole check off
+    "BOT_MIN_POSTS": 1,                     # An empty gallery is the strongest signal
+    "BOT_MIN_FOLLOWERS": 10,
+    "BOT_MAX_FOLLOWING": 3000,
+    "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
+
     # Unfollow delays - same conservative philosophy as follow
     "UNFOLLOW_DELAY_MIN": 15,               # Minimum seconds between unfollows
     "UNFOLLOW_DELAY_MAX": 30,               # Maximum seconds between unfollows
@@ -144,6 +151,13 @@ UNFOLLOW_CONFIRM_MARKERS = (
     "non seguire", "smetti",    # IT
 )
 
+# The word beside the post count in a profile header. Only the post count needs one:
+# the follower and following counts are found by their links, which carry no text.
+# "post" is a prefix of the English plural, so a single entry covers both languages.
+POSTS_LABEL_MARKERS = (
+    "post",   # EN "posts" / IT "post"
+)
+
 # Labels on a post dialog's close button. Matched via XPath contains(), which is
 # case-sensitive, so these keep their original capitalization.
 CLOSE_BUTTON_LABELS = ("Close", "Chiudi")
@@ -180,6 +194,87 @@ def is_follow_button(text):
     very button it is meant to rule out.
     """
     return has_marker(text, FOLLOW_BUTTON_MARKERS) and not has_marker(text, FOLLOWING_BUTTON_MARKERS)
+
+
+def parse_count(text):
+    """A count out of Instagram's profile header as a number, or None.
+
+    Accepts the shapes Instagram renders: plain digits, thousands separated by
+    either , or . depending on locale, and abbreviations such as 12.3K, 1,2K, 5M.
+
+    A separator means a decimal point only when a multiplier follows it, which is
+    what tells "1.234" (one thousand two hundred and thirty four) from "1.2K"
+    (one thousand two hundred).
+    """
+    if not text:
+        return None
+
+    # Some locales separate thousands with a space, so "1 234" has to read as 1234
+    # and not as 1. Getting that wrong understates a count, which is the direction
+    # that matters: it would reject a real account rather than let one through.
+    text = re.sub(r'(?<=\d)[\s  ](?=\d)', '', str(text))
+
+    match = re.search(r'(\d[\d.,]*)\s*([KkMmBb])?', text)
+    if not match:
+        return None
+
+    digits = match.group(1).rstrip('.,')
+    multiplier = match.group(2)
+
+    if multiplier:
+        try:
+            value = float(digits.replace(',', '.'))
+        except ValueError:
+            return None
+        return int(value * {'k': 1_000, 'm': 1_000_000, 'b': 1_000_000_000}[multiplier.lower()])
+
+    digits = digits.replace('.', '').replace(',', '')
+    return int(digits) if digits.isdigit() else None
+
+
+def bot_rejection_reason(posts, followers, following):
+    """Why a profile looks automated, as a phrase for the log, or None to allow it.
+
+    An account with nothing posted, almost nobody following it, or following
+    thousands while followed by few, is not going to reciprocate a follow.
+
+    Any count that could not be read arrives as None and takes no part in the
+    decision. A missing signal must never count as a bad one: Instagram changes
+    its markup regularly, and a reading that quietly fails has to let everyone
+    through rather than reject everyone.
+    """
+    if posts is not None and posts < CONFIG["BOT_MIN_POSTS"]:
+        return f"{posts} posts"
+
+    if followers is not None and followers < CONFIG["BOT_MIN_FOLLOWERS"]:
+        return f"only {followers} followers"
+
+    if following is not None and following > CONFIG["BOT_MAX_FOLLOWING"]:
+        return f"follows {following} accounts"
+
+    if (followers is not None and following is not None
+            and following > followers * CONFIG["BOT_MAX_FOLLOWING_RATIO"]):
+        return f"follows {following} but has {followers} followers"
+
+    return None
+
+
+def parse_posts_count(header_text):
+    """The post count out of a profile header's text, or None.
+
+    Found by the word beside it rather than by position: the header also carries the
+    follower and following counts, the display name and the bio, so the post count
+    is not reliably the first number in it.
+    """
+    for marker in POSTS_LABEL_MARKERS:
+        match = re.search(
+            r'([\d.,]+\s*[KkMmBb]?)\s*' + re.escape(marker),
+            header_text or "",
+            re.IGNORECASE,
+        )
+        if match:
+            return parse_count(match.group(1))
+    return None
 
 
 def parse_follower_count(text):
@@ -317,6 +412,33 @@ document.querySelectorAll("a[href*='/p/']").forEach(a => {
 return hrefs;
 """
 
+# The three numbers in a profile header, read where the browser already is when a
+# follow is about to happen. Returns raw strings rather than numbers, so the
+# parsing - and every locale quirk in it - stays in Python where it is tested.
+#
+# The follower and following counts are found by their links, which are structural
+# and survive Instagram's redesigns better than any class name. Where the visible
+# text is abbreviated ("12.3K") the exact figure is usually in a title attribute
+# alongside it, so that is preferred. The post count has no link, so it is left to
+# a search of the header text.
+PROFILE_STATS_JS = """
+const header = document.querySelector('header');
+if (!header) return null;
+
+function read(link) {
+    if (!link) return null;
+    const titled = link.querySelector('[title]');
+    const title = titled ? titled.getAttribute('title') : null;
+    return {title: title, text: link.innerText || link.textContent || ''};
+}
+
+return {
+    headerText: header.innerText || header.textContent || '',
+    followers: read(header.querySelector('a[href$="/followers/"]')),
+    following: read(header.querySelector('a[href$="/following/"]')),
+};
+"""
+
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -339,6 +461,11 @@ def load_config():
         "RETRY_ATTEMPTS": 2,
         "RETRY_BACKOFF": 3,
         "EXTRACTION_PAUSE_DURATION": 2,
+        "BOT_FILTER_ENABLED": 1,
+        "BOT_MIN_POSTS": 1,
+        "BOT_MIN_FOLLOWERS": 10,
+        "BOT_MAX_FOLLOWING": 3000,
+        "BOT_MAX_FOLLOWING_RATIO": 5,
         "UNFOLLOW_DELAY_MIN": 15,
         "UNFOLLOW_DELAY_MAX": 30,
         "UNFOLLOW_DAILY_LIMIT": 20,
@@ -2049,6 +2176,54 @@ def find_follow_button():
         return None, "error"
 
 
+def read_profile_stats():
+    """(posts, followers, following) for the profile in the browser, None where unread.
+
+    Never raises. A profile whose numbers cannot be read has to stay followable.
+    """
+    try:
+        raw = driver.execute_script(PROFILE_STATS_JS)
+    except WebDriverException as e:
+        logger.info(f"Could not read profile stats: {type(e).__name__}")
+        return None, None, None
+
+    if not raw:
+        return None, None, None
+
+    def count(entry):
+        if not entry:
+            return None
+        # The title attribute holds the exact figure where the text is abbreviated,
+        # so prefer it - but only when it parsed, and 0 is a value like any other.
+        from_title = parse_count(entry.get('title'))
+        return from_title if from_title is not None else parse_count(entry.get('text'))
+
+    return (
+        parse_posts_count(raw.get('headerText')),
+        count(raw.get('followers')),
+        count(raw.get('following')),
+    )
+
+
+def profile_bot_reason():
+    """Why the profile in the browser looks automated, or None to follow it."""
+    posts, followers, following = read_profile_stats()
+
+    if posts is None and followers is None and following is None:
+        # Fail open - but say so. Staying silent here would look exactly like a
+        # profile that passed the check, and if Instagram's header changes this is
+        # the only way to find out the filter has stopped doing anything.
+        log("⚠️ Could not read this profile's counts - bot filter skipped", 'warning')
+        return None
+
+    reason = bot_rejection_reason(posts, followers, following)
+    logger.info(
+        f"Profile stats: posts={posts} followers={followers} "
+        f"following={following} -> {reason or 'ok'}"
+    )
+    return reason
+
+
 def follow_user(username, delay_min, delay_max):
     """Follow a single user with validation."""
     try:
@@ -2073,6 +2248,15 @@ def follow_user(username, delay_min, delay_max):
             # Don't stop - just warn and continue
             # stats.increment('skipped_rate_limited')
             # return False, "rate_limited"
+
+        # The counts only exist on the profile, and the browser is already on it, so
+        # this is the one place the check is free. It is a gate rather than a filter:
+        # by now the account is in the queue, and this is what stops it being followed.
+        if CONFIG["BOT_FILTER_ENABLED"]:
+            bot_reason = profile_bot_reason()
+            if bot_reason:
+                log(f"🤖 Skip {username} | looks automated: {bot_reason}", 'warning')
+                return False, "filtered_bot"
 
         # Find follow button
         btn, status = find_follow_button()
@@ -2207,6 +2391,13 @@ def follow_from_queue(users_to_follow, delay_min, delay_max, limit):
                 log(f"⚠️ Skip {user} | already following", 'warning')
                 remove_from_queue(user)  # Remove since already following
                 log_followed_user(user, "already_following")
+            elif reason == "filtered_bot":
+                # follow_user already logged which signal rejected it. Recorded in the
+                # history so the queue drops it and later extractions do not re-add it:
+                # the verdict would not change on a second visit, and re-checking would
+                # cost another profile load every session.
+                remove_from_queue(user)
+                log_followed_user(user, "filtered_bot")
             else:
                 log(f"⚠️ Skip {user} | {reason}", 'warning')
                 # Don't remove from queue on error - can retry next time
@@ -3741,6 +3932,20 @@ def setup_gui():
                       "← Soft target for follows per session (not enforced)")
 
     # ─── UNFOLLOW SETTINGS ───
+    bot_frame = ttk.LabelFrame(settings_scrollable_frame, text='🤖 Bot Filter', padding=10)
+    bot_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+
+    create_config_row(bot_frame, 0, "BOT_FILTER_ENABLED", "BOT_FILTER_ENABLED",
+                      "← 1 to check each profile before following it, 0 to follow everything")
+    create_config_row(bot_frame, 1, "BOT_MIN_POSTS", "BOT_MIN_POSTS",
+                      "← Reject a profile with fewer posts than this")
+    create_config_row(bot_frame, 2, "BOT_MIN_FOLLOWERS", "BOT_MIN_FOLLOWERS",
+                      "← Reject a profile with fewer followers than this")
+    create_config_row(bot_frame, 3, "BOT_MAX_FOLLOWING", "BOT_MAX_FOLLOWING",
+                      "← Reject a profile following more accounts than this")
+    create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
+                      "← Reject when following exceeds followers by this many times")
+
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
 
@@ -3824,6 +4029,12 @@ FOLLOW SETTINGS:
 • FOLLOW_BATCH_SIZE: How many follows before a batch cooldown
 • FOLLOW_BATCH_COOLDOWN: Seconds of cooldown after each batch
 • MAX_FOLLOWS_PER_SESSION: Soft target (not enforced) for follows per session
+
+BOT FILTER:
+Checked on the profile page, just before following, because posts/followers/following
+are not in the followers list a candidate is found in. So it does not keep bots out of
+the queue - it stops them being followed, and drops them from the queue when reached.
+A profile whose counts cannot be read is followed anyway, with a warning in the log.
 
 For development: Lower delays to test faster, increase cooldowns if getting blocked."""
 
