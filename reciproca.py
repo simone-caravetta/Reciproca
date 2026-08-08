@@ -2632,6 +2632,10 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         visited_posts = set()
         scroll_count = 0
         author_count = 0
+        # A post has to be opened to find out whose it is, so posts spent on authors
+        # already handled are the price of working along the grid. Counted to keep
+        # that price visible next to what it bought.
+        posts_opened = 0
 
         driver.get(f"https://www.instagram.com/explore/tags/{kw}/")
         time.sleep(random.uniform(2.5, 4.0))  # Randomized initial wait
@@ -2704,6 +2708,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                     time.sleep(random.uniform(0.5, 1.5))  # Randomized scroll delay
 
                     driver.execute_script("arguments[0].click();", post)
+                    posts_opened += 1
                     time.sleep(random.uniform(1.5, 2.5))  # Randomized after-click wait
 
                     profile_url = get_author_profile()
@@ -2714,7 +2719,11 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                     username = profile_url.rstrip("/").split("/")[-1]
 
                     if username in visited_authors or username in deferred_authors:
-                        log(f"⏭️ Skip duplicate: {username}", 'warning')
+                        # An author usually has several posts under one hashtag, so
+                        # working along the grid runs into them again. Not a repeated
+                        # post - those are filtered out before this loop - but
+                        # another post by an author this hashtag has already settled.
+                        log(f"⏭️ Skip author {username}, already handled - moving on to the next post")
                         close_post()
                         continue
 
@@ -2756,7 +2765,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 except Exception as e:
                     log(f"❌ Author error for {username}: {e}", 'error')
 
-        log(f"🎯 Authors collected: {len(visited_authors)}")
+        log(f"🎯 #{kw}: {len(visited_authors)} authors scraped from {posts_opened} posts opened")
 
         # Anti-throttling: longer break between hashtags
         if hashtag_idx < total_hashtags:
