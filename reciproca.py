@@ -2718,29 +2718,27 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     username = profile_url.rstrip("/").split("/")[-1]
 
-                    if username in visited_authors:
-                        # Authors have several posts under one hashtag, so working
-                        # along the grid runs into them again. Not a repeated post -
-                        # those are filtered out before this loop.
-                        log(f"⏭️ Skip author {username}, already scraped this run - moving on")
-                        close_post()
-                        continue
-
-                    if username in author_history:
-                        # Scraped in an earlier session. Hold it back and move on to
-                        # the next post: this is what stops every run on the same
-                        # hashtag from returning the same candidates. Holding one back
-                        # twice costs nothing, so a later post of theirs needs no
-                        # separate case.
+                    if username in visited_authors or username in author_history:
+                        # Already scraped, either in an earlier session or minutes ago
+                        # in this one. Both mean the same thing from here - move on to
+                        # the next post - so both say it the same way. Authors have
+                        # several posts under one hashtag, so working along the grid
+                        # runs into them repeatedly; none of this is a repeated post,
+                        # those are filtered out before the loop.
                         #
-                        # Checked after visited_authors, and that order carries
-                        # weight: scrape_author() records the author in the history
-                        # straight away, so one scraped moments ago matches here too.
-                        # Were this branch first, it would offer that author back to
-                        # the fallback, which would open their followers popup a
-                        # second time in the same run.
-                        deferred_authors[username] = profile_url
-                        log(f"⏳ Already scraped {username} before, moving on to the next post")
+                        # What differs is only what gets recorded. An author from an
+                        # earlier session is held back as a fallback candidate, in
+                        # case the hashtag cannot reach its target with new ones -
+                        # that is what makes an author left alone for a while come
+                        # back up. One already scraped in this run is simply done, and
+                        # must not be held back: scrape_author() writes the author
+                        # into the history straight away, so without this guard it
+                        # would be offered to the fallback and have its followers
+                        # popup opened a second time in one run.
+                        if username not in visited_authors:
+                            deferred_authors[username] = profile_url
+
+                        log(f"⏭️ Skip author {username}, already scraped - moving on to the next post")
                         close_post()
                         continue
 
