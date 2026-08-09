@@ -301,6 +301,60 @@ def parse_labelled_count(header_text, markers):
     return None
 
 
+def count_link_value(entry, markers):
+    """The count carried by one header link, or None if it carries something else.
+
+    A profile header holds more than one link to the same followers page. Beside the
+    count there is the line about the people you both follow, which reads "11
+    followers you follow". Taking whichever came first meant reading that eleven as
+    the account's whole audience, and the bot filter then rejected real accounts for
+    having eleven followers and hundreds of following.
+
+    The count link says the number and, at most, the word for what it counts. So a
+    link qualifies only when nothing is left over once those two are removed, which
+    is what tells "624 followers" apart from "11 followers you follow".
+    """
+    if not entry:
+        return None
+
+    text = (entry.get('text') or "").strip()
+    if parse_count(text) is None:
+        return None
+
+    leftover = re.sub(r'\d' + COUNT_CHARS + r'*[KkMmBb]?', ' ', text, count=1)
+    for marker in markers:
+        leftover = re.sub(re.escape(marker), ' ', leftover, flags=re.IGNORECASE)
+    if leftover.strip():
+        return None
+
+    # The title attribute holds the exact figure where the text is abbreviated, so
+    # prefer it - but only when it parsed, and 0 is a value like any other.
+    from_title = parse_count(entry.get('title'))
+    return from_title if from_title is not None else parse_count(text)
+
+
+def count_from_links(entries, markers):
+    """The count from the first header link that is a count link, or None."""
+    for entry in entries or []:
+        value = count_link_value(entry, markers)
+        if value is not None:
+            return value
+    return None
+
+
+# How far the two routes to a count may differ and still be describing the same
+# number. Only abbreviation should separate them: a title of 12345 against a
+# rendered "12.3K" is a fraction of a percent out, and "1M" at its widest is 5%.
+# Ten percent leaves that alone while catching a misread, which is never close -
+# the link that started this read 11 where the header said 624.
+COUNT_AGREEMENT_TOLERANCE = 0.10
+
+
+def counts_agree(a, b):
+    """True if two readings of one count differ by no more than abbreviation would."""
+    return abs(a - b) <= max(abs(a), abs(b)) * COUNT_AGREEMENT_TOLERANCE
+
+
 def parse_follower_count(text):
     """First token in `text` that looks like a follower count, or None.
 
@@ -456,24 +510,33 @@ return hrefs;
 # text is abbreviated ("12.3K") the exact figure is usually in a title attribute
 # alongside it, so that is preferred. The post count has no link, so it is left to
 # a search of the header text.
+#
+# Every matching link is returned, not the first. More than one of them points at a
+# profile's followers: beside the count there is the line about people you both
+# follow, which reads "11 followers you follow" and leads to the same page. Which
+# comes first in the markup is Instagram's business, so choosing between them is
+# left to Python, where it is tested.
 PROFILE_STATS_JS = """
 const header = document.querySelector('header');
 if (!header) return null;
 
 function read(link) {
-    if (!link) return null;
     // The title may be on the link itself, which querySelector would not reach.
     const titled = link.matches('[title]') ? link : link.querySelector('[title]');
     const title = titled ? titled.getAttribute('title') : null;
     return {title: title, text: link.innerText || link.textContent || ''};
 }
 
+function readAll(selector) {
+    return Array.from(header.querySelectorAll(selector)).map(read);
+}
+
 // Matched loosely on purpose: the href is not always exactly "/user/followers/" -
 // it can carry a query string or lose its trailing slash.
 return {
     headerText: header.innerText || header.textContent || '',
-    followers: read(header.querySelector('a[href*="/followers"]')),
-    following: read(header.querySelector('a[href*="/following"]')),
+    followers: readAll('a[href*="/followers"]'),
+    following: readAll('a[href*="/following"]'),
 };
 """
 
@@ -2291,28 +2354,40 @@ def read_profile_stats():
 
     header_text = raw.get('headerText') or ""
 
-    def from_link(entry):
-        if not entry:
-            return None
-        # The title attribute holds the exact figure where the text is abbreviated,
-        # so prefer it - but only when it parsed, and 0 is a value like any other.
-        from_title = parse_count(entry.get('title'))
-        return from_title if from_title is not None else parse_count(entry.get('text'))
+    def read(entries, markers, name):
+        """One count, from its link and from the header text, only if they agree.
 
-    # Two independent routes to each count, because one link that cannot be found
-    # used to mean that check simply did not happen.
-    followers = from_link(raw.get('followers'))
-    if followers is None:
-        followers = parse_labelled_count(header_text, FOLLOWERS_LABEL_MARKERS)
+        Two independent routes, because one link that cannot be found used to mean
+        the check simply did not happen. Where both answer they are checked against
+        each other rather than one silently winning: they are anchored on different
+        things, so a disagreement means the header is not what this code thinks it
+        is, and a number nobody can vouch for must not reject an account. That is
+        the same rule the filter already applies to a count it could not read at
+        all - the difference here is that the misreading looks like an answer.
+        """
+        from_link = count_from_links(entries, markers)
+        from_text = parse_labelled_count(header_text, markers)
 
-    following = from_link(raw.get('following'))
-    if following is None:
-        following = parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS)
+        if from_link is None:
+            return from_text
+        if from_text is None:
+            return from_link
+        if counts_agree(from_link, from_text):
+            # The link is the precise one where the rendered text was abbreviated.
+            return from_link
+
+        log(
+            f"⚠️ Two different {name} counts on this profile "
+            f"({from_link} beside the link, {from_text} in the header) - "
+            f"that check was skipped",
+            'warning'
+        )
+        return None
 
     return (
         parse_labelled_count(header_text, POSTS_LABEL_MARKERS),
-        followers,
-        following,
+        read(raw.get('followers'), FOLLOWERS_LABEL_MARKERS, "follower"),
+        read(raw.get('following'), FOLLOWING_LABEL_MARKERS, "following"),
     )
 
 
