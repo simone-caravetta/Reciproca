@@ -26,7 +26,9 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
@@ -1587,6 +1589,23 @@ def get_author_profile():
     except (NoSuchElementException, TimeoutException):
         return None
 
+def collect_post_links():
+    """Post tiles on the hashtag page, or None if the page could not be read.
+
+    None means "could not look", which is not the same as "there is nothing there" and
+    must not be read as an exhausted hashtag. It happens when a post is open over the
+    grid and will not close: its links belong to that post, so collecting them would
+    queue up addresses that stop existing the moment it does close.
+    """
+    hrefs = driver.execute_script(POST_LINKS_JS)
+    if hrefs is not None:
+        return hrefs
+
+    log("⚠️ A post was still open over the grid, closing it", 'warning')
+    close_post()
+    return driver.execute_script(POST_LINKS_JS)
+
+
 @retry()
 def open_post(href):
     """Click the grid tile for one post, finding it at the moment of use.
@@ -1601,30 +1620,60 @@ def open_post(href):
     driver.execute_script("arguments[0].click();", post)
 
 
-def close_post():
-    """Close post dialog."""
+def post_dialog_open():
+    """True while a post is open over the grid."""
     try:
-        # Try localized labels first, then locale-independent fallbacks
+        return bool(driver.find_elements(By.XPATH, "//div[@role='dialog']"))
+    except WebDriverException:
+        return False
+
+
+def close_post():
+    """Close the open post. True if nothing is open afterwards.
+
+    Escape first: it is locale-independent and cannot press the wrong thing. Only if
+    the post survives that does this hunt for a close button, and every attempt is
+    checked rather than assumed.
+
+    It used to click the first svg inside any button in the dialog when the labelled
+    close button did not match, then return as soon as a click went through. That
+    selector matches the like, comment and save controls just as readily as the close
+    X, so it could act on a stranger's post and report success while the post stayed
+    open - which is how the grid ended up being read with a post over it.
+    """
+    try:
+        if not post_dialog_open():
+            return True
+
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(0.5)
+        if not post_dialog_open():
+            return True
+
+        # Only buttons that say they close something, by visible text or by label.
         selectors = [
             f"//div[@role='dialog']//button[contains(., '{label}')]"
             for label in CLOSE_BUTTON_LABELS
         ] + [
-            "//div[@role='dialog']//button//*[name()='svg']",
-            "//div[@role='dialog']//button[@aria-label='Close']",
+            f"//button[@aria-label='{label}']" for label in CLOSE_BUTTON_LABELS
         ]
 
         for selector in selectors:
-            buttons = driver.find_elements(By.XPATH, selector)
-            for btn in buttons:
+            for btn in driver.find_elements(By.XPATH, selector):
                 try:
                     driver.execute_script("arguments[0].click();", btn)
                     time.sleep(0.5)
-                    return
-                except:
+                    if not post_dialog_open():
+                        return True
+                except Exception:
                     continue
+
+        logger.info("Post dialog would not close")
+        return False
 
     except Exception as e:
         logger.debug(f"Close post error: {e}")
+        return False
 
 @retry()
 def open_followers_popup():
@@ -2926,14 +2975,10 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         while (len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
                and not stop_requested.is_set()):
 
-            hrefs = driver.execute_script(POST_LINKS_JS)
+            hrefs = collect_post_links()
             if hrefs is None:
-                # A post dialog outlived the post it belonged to. Its links are not
-                # tiles, so collecting from this page would queue up comment and
-                # likes URLs that stop existing the moment it closes.
-                log("⚠️ A post dialog was still open, closing it", 'warning')
-                close_post()
-                hrefs = driver.execute_script(POST_LINKS_JS) or []
+                stop_reason = "a post would not close, so the grid could not be read"
+                break
 
             fresh = [href for href in hrefs if href not in visited_posts]
 
@@ -2948,10 +2993,16 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 time.sleep(random.uniform(2, 3.5))  # Randomized scroll delay
                 scroll_count += 1
 
+                after_scroll = collect_post_links()
+                if after_scroll is None:
+                    stop_reason = "a post would not close, so the grid could not be read"
+                    break
+
                 # A scroll that loads nothing new means the hashtag has no more to
                 # show, or Instagram has stopped answering. Either way there is
-                # nothing to be gained by scrolling on.
-                if len(driver.execute_script(POST_LINKS_JS) or []) <= len(hrefs):
+                # nothing to be gained by scrolling on. Two in a row rather than one,
+                # since a single scroll can come back empty on a slow response.
+                if len(after_scroll) <= len(hrefs):
                     unproductive_scrolls += 1
                     if unproductive_scrolls >= 2:
                         stop_reason = "the hashtag stopped loading new posts"
