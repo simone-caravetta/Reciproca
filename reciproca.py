@@ -1738,6 +1738,26 @@ def close_post():
         logger.debug(f"Close post error: {e}")
         return False
 
+
+def leave_extra_window(main_window):
+    """Close the window in front, whatever it is, and go back to `main_window`.
+
+    Called while a failure may be on its way out, so it must not raise one of its
+    own: an error here would replace the one being reported, and the log would say
+    a window could not be closed instead of saying what actually went wrong.
+    """
+    try:
+        if driver.current_window_handle != main_window:
+            driver.close()
+    except WebDriverException as e:
+        logger.debug(f"Could not close the extra window: {e}")
+
+    try:
+        driver.switch_to.window(main_window)
+    except WebDriverException as e:
+        logger.debug(f"Could not switch back to the main window: {e}")
+
+
 @retry()
 def open_followers_popup():
     """Open followers popup on profile page."""
@@ -2933,8 +2953,9 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     def scrape_author(username, profile_url, hashtag):
         """Extract one author's followers and record that the author was used.
 
-        Leaves the browser on the window it was called from. The caller owns the
-        post dialog, if there is one - only the fresh-author path opens one.
+        Leaves the browser on the window it was called from, whether or not the
+        extraction worked. The caller owns the post dialog, if there is one - only
+        the fresh-author path opens one.
         """
         nonlocal author_count, total_authors_processed, throttle_cooldown_count
         global last_scrape_frequencies, live_frequencies
@@ -2944,48 +2965,62 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         total_authors_processed += 1
         log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
 
+        # The author's profile is read in a window of its own, so the hashtag grid
+        # keeps its scroll position. Which window to come back to is remembered
+        # rather than assumed to be the first one.
+        grid_window = driver.current_window_handle
+
         driver.execute_script("window.open(arguments[0]);", profile_url)
         driver.switch_to.window(driver.window_handles[-1])
-        time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
 
-        if open_followers_popup():
-            users = extract_users_from_followers(
-                current_hashtag=hashtag,
-                author_num=author_count,
-                total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
-                author_name=username
-            )
-            all_users.extend(users)
+        # Everything from here happens in that window, so getting out of it is a
+        # finally and not a line at the end. Reaching the end was the only way back
+        # before, and an extraction that raised - a popup that would not scroll, a
+        # save that failed - left the browser sitting on the author's profile with
+        # the window still open. The caller caught the error and moved on to the
+        # next post, whose tile is not on a profile page, so it failed too, and so
+        # did every post after it: the run filled with "no such element" and a
+        # window was left behind for each one.
+        try:
+            time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
 
-            # Update frequencies incrementally for this author
-            current_frequencies.update(users)
-            last_scrape_frequencies = previous_frequencies + current_frequencies
-            save_frequencies(last_scrape_frequencies)
+            if open_followers_popup():
+                users = extract_users_from_followers(
+                    current_hashtag=hashtag,
+                    author_num=author_count,
+                    total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
+                    author_name=username
+                )
+                all_users.extend(users)
 
-            log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
+                # Update frequencies incrementally for this author
+                current_frequencies.update(users)
+                last_scrape_frequencies = previous_frequencies + current_frequencies
+                save_frequencies(last_scrape_frequencies)
 
-            # Update live extraction display for real-time feedback
-            live_extracted_users.extend(users)
-            live_frequencies = current_frequencies.copy()  # Mirror current frequencies
-            update_live_extraction_display()
+                log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
 
-            # Skip authors with very high follower counts to avoid throttling
-            if len(users) < 5:
-                log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
+                # Update live extraction display for real-time feedback
+                live_extracted_users.extend(users)
+                live_frequencies = current_frequencies.copy()  # Mirror current frequencies
+                update_live_extraction_display()
 
-            # Anti-throttling: detect low extraction as rate limiting signal
-            if len(users) < 25:
-                throttle_cooldown_count += 1
-                if throttle_cooldown_count >= 2:
-                    cooldown = random.uniform(8, 12)
-                    log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
-                    time.sleep(cooldown)
-                    throttle_cooldown_count = 0  # Reset after cooldown
-            else:
-                throttle_cooldown_count = 0  # Reset on good extraction
+                # Skip authors with very high follower counts to avoid throttling
+                if len(users) < 5:
+                    log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
 
-        driver.close()
-        driver.switch_to.window(driver.window_handles[0])
+                # Anti-throttling: detect low extraction as rate limiting signal
+                if len(users) < 25:
+                    throttle_cooldown_count += 1
+                    if throttle_cooldown_count >= 2:
+                        cooldown = random.uniform(8, 12)
+                        log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
+                        time.sleep(cooldown)
+                        throttle_cooldown_count = 0  # Reset after cooldown
+                else:
+                    throttle_cooldown_count = 0  # Reset on good extraction
+        finally:
+            leave_extra_window(grid_window)
 
         # Mark the author used even if the popup never opened. Retrying next
         # session would hit the same wall, and the point of the rotation is to
@@ -3096,6 +3131,11 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                 visited_posts.add(href)
 
+                # Whatever happens to this post, the grid has to be left uncovered
+                # for the next one: open_post() clicks a tile, and a tile behind an
+                # open dialog is not something to click. Closing used to be a line
+                # on each way out, which meant the one way out that was not written
+                # down - an error - left the post open.
                 try:
                     open_post(href)
                     posts_opened += 1
@@ -3103,7 +3143,6 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     profile_url = get_author_profile()
                     if not profile_url:
-                        close_post()
                         continue
 
                     username = profile_url.rstrip("/").split("/")[-1]
@@ -3129,15 +3168,15 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                             deferred_authors[username] = profile_url
 
                         log(f"⏭️ Skip author {username}, already scraped - moving on to the next post")
-                        close_post()
                         continue
 
                     scrape_author(username, profile_url, kw)
-                    close_post()
 
                 except Exception as e:
                     log(f"❌ Post error: {brief_error(e)}", 'error')
                     logger.debug(f"Post error on {href}", exc_info=True)
+                finally:
+                    close_post()
 
         # Short of the target, so fall back to authors used before, least recently
         # scraped first. Their profile URLs are already in hand from the posts that

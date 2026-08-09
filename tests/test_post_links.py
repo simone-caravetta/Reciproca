@@ -10,8 +10,10 @@ the shipped code.
 
     python3 tests/test_post_links.py
 """
+import ast
 import inspect
 import re
+import textwrap
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
@@ -90,6 +92,107 @@ class ClosePostTest(unittest.TestCase):
             self.source.count("post_dialog_open()"), 3,
             "expected a check before, after Escape, and after each button clicked",
         )
+
+
+class FakeDriver:
+    """Enough of a browser to watch which window gets closed and switched to."""
+
+    def __init__(self, handles, current, fail_on=()):
+        self.window_handles = list(handles)
+        self.current_window_handle = current
+        self.fail_on = fail_on
+        self.closed = []
+        self.switch_to = self
+
+    def close(self):
+        if "close" in self.fail_on:
+            raise _stubs.WebDriverException("window already gone")
+        self.closed.append(self.current_window_handle)
+        self.window_handles.remove(self.current_window_handle)
+        self.current_window_handle = None
+
+    def window(self, handle):  # reached as driver.switch_to.window(...)
+        if "switch" in self.fail_on:
+            raise _stubs.WebDriverException("no such window")
+        self.current_window_handle = handle
+
+
+class LeaveExtraWindowTest(unittest.TestCase):
+    """Getting back to the grid after reading an author's profile in its own window.
+
+    It runs while a failure may be on its way out, so nothing it does may raise: an
+    error here would replace the one being reported.
+    """
+
+    def leave(self, driver):
+        R.driver = driver
+        R.leave_extra_window("grid")
+        return driver
+
+    def test_it_closes_the_author_window_and_goes_back(self):
+        driver = self.leave(FakeDriver(["grid", "author"], "author"))
+        self.assertEqual(driver.closed, ["author"])
+        self.assertEqual(driver.current_window_handle, "grid")
+
+    def test_it_does_not_close_the_grid_it_is_returning_to(self):
+        """Called from the grid window already, there is nothing to tidy up."""
+        driver = self.leave(FakeDriver(["grid"], "grid"))
+        self.assertEqual(driver.closed, [])
+        self.assertEqual(driver.current_window_handle, "grid")
+
+    def test_a_window_that_will_not_close_still_leaves_us_on_the_grid(self):
+        driver = self.leave(FakeDriver(["grid", "author"], "author", fail_on=("close",)))
+        self.assertEqual(driver.current_window_handle, "grid")
+
+    def test_it_never_raises_over_the_failure_being_reported(self):
+        self.leave(FakeDriver(["grid", "author"], "author", fail_on=("close", "switch")))
+
+
+class TidyUpAfterAFailureTest(unittest.TestCase):
+    """Every way out of a post has to leave the browser ready for the next one.
+
+    Reading the shipped source, since neither path can be driven without a browser.
+    """
+
+    def setUp(self):
+        self.source = textwrap.dedent(inspect.getsource(R.scrape_and_fill_queue))
+        self.tree = ast.parse(self.source)
+
+    def finally_calls(self):
+        """Every function called in the finally of any try in the scraping loop."""
+        return {
+            child.func.id
+            for node in ast.walk(self.tree) if isinstance(node, ast.Try)
+            for stmt in node.finalbody
+            for child in ast.walk(stmt)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+        }
+
+    def calls_to(self, name):
+        return sum(
+            1 for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == name
+        )
+
+    def test_the_post_is_closed_however_the_loop_leaves_it(self):
+        self.assertIn("close_post", self.finally_calls())
+
+    def test_closing_is_not_spelled_out_once_per_way_out(self):
+        """It used to be a line on each path, and the path nobody wrote down - the
+        error - left the post open over the grid for the next tile to be clicked
+        through."""
+        self.assertEqual(self.calls_to("close_post"), 1)
+
+    def test_the_author_window_is_left_however_the_scrape_ends(self):
+        """An extraction that raised used to leave the browser on the author's
+        profile, where the next post's tile does not exist, so every post after it
+        failed too."""
+        self.assertIn("leave_extra_window", self.finally_calls())
+
+    def test_the_grid_window_is_not_assumed_to_be_the_first_one(self):
+        self.assertNotIn("window_handles[0]", self.source)
 
 
 class BriefErrorTest(unittest.TestCase):
