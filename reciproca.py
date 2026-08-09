@@ -190,6 +190,17 @@ RATE_LIMIT_MARKERS = (
 )
 
 
+def brief_error(exc):
+    """First line of an exception message, for the on-screen log.
+
+    Selenium appends a chromedriver stacktrace to every message: twenty lines of hex
+    addresses that push everything else off the screen. Callers pair this with a
+    logger.debug(exc_info=True), so the full text stays in the log file.
+    """
+    text = str(exc).strip()
+    return text.splitlines()[0] if text else type(exc).__name__
+
+
 def has_marker(text, markers):
     """True if any marker appears in text. Text must already be lowercased."""
     return any(m in text for m in markers)
@@ -411,11 +422,22 @@ return {kept, skippedFollowing, rowsWithoutButton, rowsInspected};
 # found again right before it is clicked, which keeps element references from
 # going stale while post dialogs open and close.
 POST_LINKS_JS = """
+// An open post is not the grid, and its links belong to that post rather than to the
+// hashtag, so there is nothing here worth collecting. null asks the caller to close it.
+if (document.querySelector("div[role='dialog']")) return null;
+
+// A grid tile links straight to the post and no deeper. An open post also carries a
+// link per comment (/p/<code>/c/<id>/), one for its likes (/p/<code>/liked_by/) and
+// its own permalink (/<user>/p/<code>/): all contain "/p/" without being tiles.
+// A query string is still that same post, and dropping tiles over one would look
+// like a hashtag with no posts, which is the worse way to be wrong here.
+const TILE = /^\\/p\\/[^/?]+\\/?(\\?.*)?$/;
+
 const hrefs = [];
 const seen = new Set();
 document.querySelectorAll("a[href*='/p/']").forEach(a => {
     const href = a.getAttribute('href');
-    if (href && !seen.has(href)) {
+    if (href && TILE.test(href) && !seen.has(href)) {
         seen.add(href);
         hrefs.push(href);
     }
@@ -1564,6 +1586,20 @@ def get_author_profile():
         return author.get_attribute("href")
     except (NoSuchElementException, TimeoutException):
         return None
+
+@retry()
+def open_post(href):
+    """Click the grid tile for one post, finding it at the moment of use.
+
+    References held from earlier are invalidated by post dialogs opening and closing,
+    and Instagram can redraw a tile between it being found and clicked, which is what
+    the retry covers. A tile that is simply not there raises and is not retried.
+    """
+    post = driver.find_element(By.CSS_SELECTOR, f'a[href="{href}"]')
+    driver.execute_script("arguments[0].scrollIntoView();", post)
+    time.sleep(random.uniform(0.5, 1.5))  # Randomized scroll delay
+    driver.execute_script("arguments[0].click();", post)
+
 
 def close_post():
     """Close post dialog."""
@@ -2890,7 +2926,15 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         while (len(visited_authors) < CONFIG["TARGET_AUTHORS_PER_HASHTAG"]
                and not stop_requested.is_set()):
 
-            hrefs = driver.execute_script(POST_LINKS_JS) or []
+            hrefs = driver.execute_script(POST_LINKS_JS)
+            if hrefs is None:
+                # A post dialog outlived the post it belonged to. Its links are not
+                # tiles, so collecting from this page would queue up comment and
+                # likes URLs that stop existing the moment it closes.
+                log("⚠️ A post dialog was still open, closing it", 'warning')
+                close_post()
+                hrefs = driver.execute_script(POST_LINKS_JS) or []
+
             fresh = [href for href in hrefs if href not in visited_posts]
 
             if not fresh:
@@ -2927,17 +2971,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 visited_posts.add(href)
 
                 try:
-                    # Found again right before use: opening and closing post
-                    # dialogs invalidates references held from earlier.
-                    post = driver.find_element(By.CSS_SELECTOR, f'a[href="{href}"]')
-
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView();",
-                        post
-                    )
-                    time.sleep(random.uniform(0.5, 1.5))  # Randomized scroll delay
-
-                    driver.execute_script("arguments[0].click();", post)
+                    open_post(href)
                     posts_opened += 1
                     time.sleep(random.uniform(1.5, 2.5))  # Randomized after-click wait
 
@@ -2976,7 +3010,8 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                     close_post()
 
                 except Exception as e:
-                    log(f"❌ Post error: {e}", 'error')
+                    log(f"❌ Post error: {brief_error(e)}", 'error')
+                    logger.debug(f"Post error on {href}", exc_info=True)
 
         # Short of the target, so fall back to authors used before, least recently
         # scraped first. Their profile URLs are already in hand from the posts that
@@ -2999,7 +3034,8 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 try:
                     scrape_author(username, deferred_authors[username], kw)
                 except Exception as e:
-                    log(f"❌ Author error for {username}: {e}", 'error')
+                    log(f"❌ Author error for {username}: {brief_error(e)}", 'error')
+                    logger.debug(f"Author error for {username}", exc_info=True)
 
         log(f"🎯 #{kw}: {len(visited_authors)} authors scraped from {posts_opened} posts opened")
 
