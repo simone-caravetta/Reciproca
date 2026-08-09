@@ -10,6 +10,7 @@ the shipped code.
 
     python3 tests/test_post_links.py
 """
+import inspect
 import re
 import unittest
 
@@ -63,6 +64,32 @@ class PostLinkFilterTest(unittest.TestCase):
         is not the grid, so the script asks the caller to close it instead."""
         self.assertIn("div[role='dialog']", R.POST_LINKS_JS)
         self.assertIn("return null", R.POST_LINKS_JS)
+
+
+class ClosePostTest(unittest.TestCase):
+    """Reading the source rather than driving a browser, which these tests cannot do.
+    Both checks guard a specific regression seen in a real run."""
+
+    def setUp(self):
+        self.source = inspect.getsource(R.close_post)
+
+    def test_it_does_not_click_any_icon_it_finds(self):
+        """It used to fall back to the first svg inside any button in the dialog. That
+        matches the like, comment and save controls as readily as the close X, so a
+        failed close could act on somebody's post instead."""
+        self.assertNotIn("name()='svg'", self.source)
+
+    def test_it_presses_escape_before_hunting_for_a_button(self):
+        """Locale-independent, and it cannot press the wrong control."""
+        self.assertIn("Keys.ESCAPE", self.source)
+
+    def test_it_checks_that_the_post_actually_closed(self):
+        """It used to return as soon as a click went through, reporting success while
+        the post was still open, which is how the grid got read with a post over it."""
+        self.assertGreaterEqual(
+            self.source.count("post_dialog_open()"), 3,
+            "expected a check before, after Escape, and after each button clicked",
+        )
 
 
 class BriefErrorTest(unittest.TestCase):

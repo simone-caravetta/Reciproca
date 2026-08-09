@@ -15,7 +15,8 @@ STUBBED = [
     "selenium", "selenium.common", "selenium.common.exceptions",
     "selenium.webdriver", "selenium.webdriver.chrome",
     "selenium.webdriver.chrome.service", "selenium.webdriver.common",
-    "selenium.webdriver.common.by", "selenium.webdriver.support",
+    "selenium.webdriver.common.by", "selenium.webdriver.common.keys",
+    "selenium.webdriver.common.action_chains", "selenium.webdriver.support",
     "selenium.webdriver.support.ui", "webdriver_manager", "webdriver_manager.chrome",
     "tkinter", "tkinter.ttk", "tkinter.scrolledtext", "tkinter.messagebox",
     "tkinter.filedialog",
@@ -36,6 +37,8 @@ for _name in ("NoSuchElementException", "StaleElementReferenceException", "Timeo
     setattr(_exceptions, _name, type(_name, (WebDriverException,), {}))
 sys.modules["selenium.webdriver.chrome.service"].Service = object
 sys.modules["selenium.webdriver.common.by"].By = object
+sys.modules["selenium.webdriver.common.keys"].Keys = object
+sys.modules["selenium.webdriver.common.action_chains"].ActionChains = object
 sys.modules["selenium.webdriver.support"].expected_conditions = object
 sys.modules["selenium.webdriver.support.ui"].WebDriverWait = object
 sys.modules["webdriver_manager.chrome"].ChromeDriverManager = object
