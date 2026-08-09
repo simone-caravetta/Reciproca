@@ -301,6 +301,60 @@ def parse_labelled_count(header_text, markers):
     return None
 
 
+def count_link_value(entry, markers):
+    """The count carried by one header link, or None if it carries something else.
+
+    A profile header holds more than one link to the same followers page. Beside the
+    count there is the line about the people you both follow, which reads "11
+    followers you follow". Taking whichever came first meant reading that eleven as
+    the account's whole audience, and the bot filter then rejected real accounts for
+    having eleven followers and hundreds of following.
+
+    The count link says the number and, at most, the word for what it counts. So a
+    link qualifies only when nothing is left over once those two are removed, which
+    is what tells "624 followers" apart from "11 followers you follow".
+    """
+    if not entry:
+        return None
+
+    text = (entry.get('text') or "").strip()
+    if parse_count(text) is None:
+        return None
+
+    leftover = re.sub(r'\d' + COUNT_CHARS + r'*[KkMmBb]?', ' ', text, count=1)
+    for marker in markers:
+        leftover = re.sub(re.escape(marker), ' ', leftover, flags=re.IGNORECASE)
+    if leftover.strip():
+        return None
+
+    # The title attribute holds the exact figure where the text is abbreviated, so
+    # prefer it - but only when it parsed, and 0 is a value like any other.
+    from_title = parse_count(entry.get('title'))
+    return from_title if from_title is not None else parse_count(text)
+
+
+def count_from_links(entries, markers):
+    """The count from the first header link that is a count link, or None."""
+    for entry in entries or []:
+        value = count_link_value(entry, markers)
+        if value is not None:
+            return value
+    return None
+
+
+# How far the two routes to a count may differ and still be describing the same
+# number. Only abbreviation should separate them: a title of 12345 against a
+# rendered "12.3K" is a fraction of a percent out, and "1M" at its widest is 5%.
+# Ten percent leaves that alone while catching a misread, which is never close -
+# the link that started this read 11 where the header said 624.
+COUNT_AGREEMENT_TOLERANCE = 0.10
+
+
+def counts_agree(a, b):
+    """True if two readings of one count differ by no more than abbreviation would."""
+    return abs(a - b) <= max(abs(a), abs(b)) * COUNT_AGREEMENT_TOLERANCE
+
+
 def parse_follower_count(text):
     """First token in `text` that looks like a follower count, or None.
 
@@ -456,24 +510,33 @@ return hrefs;
 # text is abbreviated ("12.3K") the exact figure is usually in a title attribute
 # alongside it, so that is preferred. The post count has no link, so it is left to
 # a search of the header text.
+#
+# Every matching link is returned, not the first. More than one of them points at a
+# profile's followers: beside the count there is the line about people you both
+# follow, which reads "11 followers you follow" and leads to the same page. Which
+# comes first in the markup is Instagram's business, so choosing between them is
+# left to Python, where it is tested.
 PROFILE_STATS_JS = """
 const header = document.querySelector('header');
 if (!header) return null;
 
 function read(link) {
-    if (!link) return null;
     // The title may be on the link itself, which querySelector would not reach.
     const titled = link.matches('[title]') ? link : link.querySelector('[title]');
     const title = titled ? titled.getAttribute('title') : null;
     return {title: title, text: link.innerText || link.textContent || ''};
 }
 
+function readAll(selector) {
+    return Array.from(header.querySelectorAll(selector)).map(read);
+}
+
 // Matched loosely on purpose: the href is not always exactly "/user/followers/" -
 // it can carry a query string or lose its trailing slash.
 return {
     headerText: header.innerText || header.textContent || '',
-    followers: read(header.querySelector('a[href*="/followers"]')),
-    following: read(header.querySelector('a[href*="/following"]')),
+    followers: readAll('a[href*="/followers"]'),
+    following: readAll('a[href*="/following"]'),
 };
 """
 
@@ -1675,6 +1738,26 @@ def close_post():
         logger.debug(f"Close post error: {e}")
         return False
 
+
+def leave_extra_window(main_window):
+    """Close the window in front, whatever it is, and go back to `main_window`.
+
+    Called while a failure may be on its way out, so it must not raise one of its
+    own: an error here would replace the one being reported, and the log would say
+    a window could not be closed instead of saying what actually went wrong.
+    """
+    try:
+        if driver.current_window_handle != main_window:
+            driver.close()
+    except WebDriverException as e:
+        logger.debug(f"Could not close the extra window: {e}")
+
+    try:
+        driver.switch_to.window(main_window)
+    except WebDriverException as e:
+        logger.debug(f"Could not switch back to the main window: {e}")
+
+
 @retry()
 def open_followers_popup():
     """Open followers popup on profile page."""
@@ -2291,28 +2374,40 @@ def read_profile_stats():
 
     header_text = raw.get('headerText') or ""
 
-    def from_link(entry):
-        if not entry:
-            return None
-        # The title attribute holds the exact figure where the text is abbreviated,
-        # so prefer it - but only when it parsed, and 0 is a value like any other.
-        from_title = parse_count(entry.get('title'))
-        return from_title if from_title is not None else parse_count(entry.get('text'))
+    def read(entries, markers, name):
+        """One count, from its link and from the header text, only if they agree.
 
-    # Two independent routes to each count, because one link that cannot be found
-    # used to mean that check simply did not happen.
-    followers = from_link(raw.get('followers'))
-    if followers is None:
-        followers = parse_labelled_count(header_text, FOLLOWERS_LABEL_MARKERS)
+        Two independent routes, because one link that cannot be found used to mean
+        the check simply did not happen. Where both answer they are checked against
+        each other rather than one silently winning: they are anchored on different
+        things, so a disagreement means the header is not what this code thinks it
+        is, and a number nobody can vouch for must not reject an account. That is
+        the same rule the filter already applies to a count it could not read at
+        all - the difference here is that the misreading looks like an answer.
+        """
+        from_link = count_from_links(entries, markers)
+        from_text = parse_labelled_count(header_text, markers)
 
-    following = from_link(raw.get('following'))
-    if following is None:
-        following = parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS)
+        if from_link is None:
+            return from_text
+        if from_text is None:
+            return from_link
+        if counts_agree(from_link, from_text):
+            # The link is the precise one where the rendered text was abbreviated.
+            return from_link
+
+        log(
+            f"⚠️ Two different {name} counts on this profile "
+            f"({from_link} beside the link, {from_text} in the header) - "
+            f"that check was skipped",
+            'warning'
+        )
+        return None
 
     return (
         parse_labelled_count(header_text, POSTS_LABEL_MARKERS),
-        followers,
-        following,
+        read(raw.get('followers'), FOLLOWERS_LABEL_MARKERS, "follower"),
+        read(raw.get('following'), FOLLOWING_LABEL_MARKERS, "following"),
     )
 
 
@@ -2858,8 +2953,9 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     def scrape_author(username, profile_url, hashtag):
         """Extract one author's followers and record that the author was used.
 
-        Leaves the browser on the window it was called from. The caller owns the
-        post dialog, if there is one - only the fresh-author path opens one.
+        Leaves the browser on the window it was called from, whether or not the
+        extraction worked. The caller owns the post dialog, if there is one - only
+        the fresh-author path opens one.
         """
         nonlocal author_count, total_authors_processed, throttle_cooldown_count
         global last_scrape_frequencies, live_frequencies
@@ -2869,48 +2965,62 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         total_authors_processed += 1
         log(f"👤 Author {author_count}/{CONFIG['TARGET_AUTHORS_PER_HASHTAG']}: {username}")
 
+        # The author's profile is read in a window of its own, so the hashtag grid
+        # keeps its scroll position. Which window to come back to is remembered
+        # rather than assumed to be the first one.
+        grid_window = driver.current_window_handle
+
         driver.execute_script("window.open(arguments[0]);", profile_url)
         driver.switch_to.window(driver.window_handles[-1])
-        time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
 
-        if open_followers_popup():
-            users = extract_users_from_followers(
-                current_hashtag=hashtag,
-                author_num=author_count,
-                total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
-                author_name=username
-            )
-            all_users.extend(users)
+        # Everything from here happens in that window, so getting out of it is a
+        # finally and not a line at the end. Reaching the end was the only way back
+        # before, and an extraction that raised - a popup that would not scroll, a
+        # save that failed - left the browser sitting on the author's profile with
+        # the window still open. The caller caught the error and moved on to the
+        # next post, whose tile is not on a profile page, so it failed too, and so
+        # did every post after it: the run filled with "no such element" and a
+        # window was left behind for each one.
+        try:
+            time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
 
-            # Update frequencies incrementally for this author
-            current_frequencies.update(users)
-            last_scrape_frequencies = previous_frequencies + current_frequencies
-            save_frequencies(last_scrape_frequencies)
+            if open_followers_popup():
+                users = extract_users_from_followers(
+                    current_hashtag=hashtag,
+                    author_num=author_count,
+                    total_authors=CONFIG["TARGET_AUTHORS_PER_HASHTAG"],
+                    author_name=username
+                )
+                all_users.extend(users)
 
-            log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
+                # Update frequencies incrementally for this author
+                current_frequencies.update(users)
+                last_scrape_frequencies = previous_frequencies + current_frequencies
+                save_frequencies(last_scrape_frequencies)
 
-            # Update live extraction display for real-time feedback
-            live_extracted_users.extend(users)
-            live_frequencies = current_frequencies.copy()  # Mirror current frequencies
-            update_live_extraction_display()
+                log(f"📊 Author {username}: {len(users)} followers extracted (total unique: {len(current_frequencies)})")
 
-            # Skip authors with very high follower counts to avoid throttling
-            if len(users) < 5:
-                log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
+                # Update live extraction display for real-time feedback
+                live_extracted_users.extend(users)
+                live_frequencies = current_frequencies.copy()  # Mirror current frequencies
+                update_live_extraction_display()
 
-            # Anti-throttling: detect low extraction as rate limiting signal
-            if len(users) < 25:
-                throttle_cooldown_count += 1
-                if throttle_cooldown_count >= 2:
-                    cooldown = random.uniform(8, 12)
-                    log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
-                    time.sleep(cooldown)
-                    throttle_cooldown_count = 0  # Reset after cooldown
-            else:
-                throttle_cooldown_count = 0  # Reset on good extraction
+                # Skip authors with very high follower counts to avoid throttling
+                if len(users) < 5:
+                    log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')
 
-        driver.close()
-        driver.switch_to.window(driver.window_handles[0])
+                # Anti-throttling: detect low extraction as rate limiting signal
+                if len(users) < 25:
+                    throttle_cooldown_count += 1
+                    if throttle_cooldown_count >= 2:
+                        cooldown = random.uniform(8, 12)
+                        log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
+                        time.sleep(cooldown)
+                        throttle_cooldown_count = 0  # Reset after cooldown
+                else:
+                    throttle_cooldown_count = 0  # Reset on good extraction
+        finally:
+            leave_extra_window(grid_window)
 
         # Mark the author used even if the popup never opened. Retrying next
         # session would hit the same wall, and the point of the rotation is to
@@ -3021,6 +3131,11 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                 visited_posts.add(href)
 
+                # Whatever happens to this post, the grid has to be left uncovered
+                # for the next one: open_post() clicks a tile, and a tile behind an
+                # open dialog is not something to click. Closing used to be a line
+                # on each way out, which meant the one way out that was not written
+                # down - an error - left the post open.
                 try:
                     open_post(href)
                     posts_opened += 1
@@ -3028,7 +3143,6 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
 
                     profile_url = get_author_profile()
                     if not profile_url:
-                        close_post()
                         continue
 
                     username = profile_url.rstrip("/").split("/")[-1]
@@ -3054,15 +3168,15 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                             deferred_authors[username] = profile_url
 
                         log(f"⏭️ Skip author {username}, already scraped - moving on to the next post")
-                        close_post()
                         continue
 
                     scrape_author(username, profile_url, kw)
-                    close_post()
 
                 except Exception as e:
                     log(f"❌ Post error: {brief_error(e)}", 'error')
                     logger.debug(f"Post error on {href}", exc_info=True)
+                finally:
+                    close_post()
 
         # Short of the target, so fall back to authors used before, least recently
         # scraped first. Their profile URLs are already in hand from the posts that

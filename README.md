@@ -113,6 +113,13 @@ npm install jsdom && node tests/test_extraction.js   # followers-dialog extracti
 The Python tests need no browser and no extra packages. Node and jsdom are only for
 that one JS test, not to run the app.
 
+When a count in the log looks wrong for a particular account, this reads that
+profile in your own logged-in browser and shows where each number came from:
+
+```bash
+python check_profile.py <username>   # close Reciproca first
+```
+
 ## Generated files (git-ignored)
 
 `chrome_profile/` and the app's own JSON state and logs, all written next to the

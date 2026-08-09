@@ -105,6 +105,148 @@ class ParseLabelledCountTest(unittest.TestCase):
             self.assertEqual(self.counts(header), (None, None, None))
 
 
+class CountLinkTest(unittest.TestCase):
+    """Which of a header's links to the followers page carries the actual count.
+
+    There is more than one. Beside the count sits the line about the people you both
+    follow, "11 followers you follow", pointing at the same page. Reading that one
+    reported a real account as having eleven followers.
+    """
+
+    def followers(self, *texts):
+        """The follower count read from links with these texts, in this order."""
+        return R.count_from_links(
+            [{'title': None, 'text': text} for text in texts],
+            R.FOLLOWERS_LABEL_MARKERS,
+        )
+
+    def test_the_count_link(self):
+        self.assertEqual(self.followers("624 followers"), 624)
+        self.assertEqual(self.followers("624 follower"), 624)
+        self.assertEqual(self.followers("624\nfollowers"), 624)
+
+    def test_the_label_can_sit_outside_the_link(self):
+        self.assertEqual(self.followers("1,234"), 1234)
+
+    def test_the_people_you_both_follow_are_not_the_count(self):
+        self.assertIsNone(self.followers("11 followers you follow"))
+        self.assertIsNone(self.followers("11 follower in comune"))
+        self.assertIsNone(self.followers("Followed by mario and 11 others"))
+        self.assertIsNone(self.followers("Seguito da mario e altri 11"))
+
+    def test_the_count_is_found_whichever_link_comes_first(self):
+        """Nothing promises the count link is the first in the markup, which is
+        what made taking the first one fail."""
+        self.assertEqual(self.followers("11 followers you follow", "624 followers"), 624)
+        self.assertEqual(self.followers("624 followers", "11 followers you follow"), 624)
+
+    def test_no_link_qualifies(self):
+        self.assertIsNone(self.followers("11 followers you follow"))
+        self.assertIsNone(self.followers())
+        self.assertIsNone(R.count_from_links(None, R.FOLLOWERS_LABEL_MARKERS))
+
+    def test_the_title_holds_the_exact_figure(self):
+        """The rendered text is abbreviated past a certain size."""
+        entries = [{'title': '12,345', 'text': '12.3K followers'}]
+        self.assertEqual(R.count_from_links(entries, R.FOLLOWERS_LABEL_MARKERS), 12345)
+
+    def test_a_link_that_is_disqualified_is_not_rescued_by_its_title(self):
+        entries = [{'title': '11', 'text': '11 followers you follow'}]
+        self.assertIsNone(R.count_from_links(entries, R.FOLLOWERS_LABEL_MARKERS))
+
+    def test_following_reads_the_same_way(self):
+        entries = [{'title': None, 'text': '664 following'}]
+        self.assertEqual(R.count_from_links(entries, R.FOLLOWING_LABEL_MARKERS), 664)
+
+
+class ReadProfileStatsTest(unittest.TestCase):
+    """The two routes to a count, and what happens when they disagree."""
+
+    ITALIAN_HEADER = (
+        "fanfanz95\nSegui\nMessaggio\n57\npost\n624\nfollower\n664\nseguiti\nNome"
+    )
+
+    class FakeDriver:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute_script(self, script, *args):
+            return self.payload
+
+    def setUp(self):
+        _stubs.install_fake_ui(R)
+
+    def read(self, payload):
+        R.driver = self.FakeDriver(payload)
+        return R.read_profile_stats()
+
+    def test_the_reported_misread(self):
+        """The run that surfaced this logged followers=11 for an account with 624,
+        because the line about people in common came first among the links."""
+        posts, followers, following = self.read({
+            'headerText': self.ITALIAN_HEADER,
+            'followers': [
+                {'title': None, 'text': '11 follower in comune'},
+                {'title': '624', 'text': '624 follower'},
+            ],
+            'following': [{'title': '664', 'text': '664 seguiti'}],
+        })
+        self.assertEqual((posts, followers, following), (57, 624, 664))
+
+    def test_the_header_text_answers_when_no_link_does(self):
+        posts, followers, following = self.read({
+            'headerText': self.ITALIAN_HEADER,
+            'followers': [{'title': None, 'text': '11 follower in comune'}],
+            'following': [],
+        })
+        self.assertEqual((posts, followers, following), (57, 624, 664))
+
+    def test_two_routes_that_disagree_answer_neither(self):
+        """A count nobody can vouch for must not reject an account, which is the
+        rule the filter already applies to one it could not read at all."""
+        _, followers, _ = self.read({
+            'headerText': self.ITALIAN_HEADER,
+            'followers': [{'title': None, 'text': '9'}],
+            'following': [],
+        })
+        self.assertIsNone(followers)
+
+    def test_abbreviation_is_not_a_disagreement(self):
+        """The header renders 12.3K where the link's title holds the exact figure;
+        the precise one wins and no warning is due."""
+        _, followers, _ = self.read({
+            'headerText': "x\n57\npost\n12.3K\nfollowers\n664\nfollowing",
+            'followers': [{'title': '12,345', 'text': '12.3K followers'}],
+            'following': [],
+        })
+        self.assertEqual(followers, 12345)
+
+    def test_nothing_readable(self):
+        self.assertEqual(self.read(None), (None, None, None))
+
+    def test_a_browser_that_will_not_answer(self):
+        class Broken:
+            def execute_script(self, script, *args):
+                raise _stubs.WebDriverException("gone")
+
+        R.driver = Broken()
+        self.assertEqual(R.read_profile_stats(), (None, None, None))
+
+
+class CountsAgreeTest(unittest.TestCase):
+    def test_abbreviation_rounding_agrees(self):
+        self.assertTrue(R.counts_agree(12345, 12300))
+        self.assertTrue(R.counts_agree(1049999, 1000000))
+
+    def test_a_misread_does_not(self):
+        self.assertFalse(R.counts_agree(11, 624))
+        self.assertFalse(R.counts_agree(624, 11))
+
+    def test_zero_against_zero(self):
+        self.assertTrue(R.counts_agree(0, 0))
+        self.assertFalse(R.counts_agree(0, 5))
+
+
 class BotVerdictTest(unittest.TestCase):
     THRESHOLDS = (
         "BOT_MIN_POSTS", "BOT_MIN_FOLLOWERS", "BOT_MAX_FOLLOWING",
