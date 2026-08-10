@@ -73,7 +73,9 @@ CONFIG = {
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
     "SEMANTIC_WEIGHT": 60,                  # 0-100. See combined_rank() for what it buys
-    "SEMANTIC_SHORTLIST": 200,              # How many top candidates get scored
+    "SEMANTIC_SHORTLIST": 200,              # How many top candidates get read
+    "SEMANTIC_QUEUE_LIMIT": 500,            # How long the queue is kept afterwards
+    "SEMANTIC_READ_DELAY": 1,               # Seconds between profiles, 0 for none
     "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
     # Unfollow delays - same conservative philosophy as follow
@@ -598,6 +600,8 @@ def load_config():
         "SEMANTIC_ENABLED": 1,
         "SEMANTIC_WEIGHT": 60,
         "SEMANTIC_SHORTLIST": 200,
+        "SEMANTIC_QUEUE_LIMIT": 500,
+        "SEMANTIC_READ_DELAY": 1,
         "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
         "UNFOLLOW_DELAY_MAX": 30,
@@ -1022,9 +1026,14 @@ def trim_queue(limit=None, frequencies=None):
     Without this the queue only grows. A search adds thousands and a session
     follows a few dozen, so the far end of the list is candidates nobody will reach
     this year, slowing every redraw and every ranking on the way past.
+
+    How long the queue is kept is a different question from how many profiles are
+    worth reading, and they used to share one setting. That made reading fewer of
+    them a way of throwing candidates away, which is not a trade anybody asked for
+    and not one that announces itself.
     """
     if limit is None:
-        limit = CONFIG["SEMANTIC_SHORTLIST"]
+        limit = CONFIG["SEMANTIC_QUEUE_LIMIT"]
 
     queue = load_queue()
     ranked = rank_queue(queue, frequencies)
@@ -3066,11 +3075,11 @@ def read_candidate_profile(username):
     about a profile that was never read.
     """
     nothing = (None, None, None)
+    header_text = None
 
     try:
         driver.get(f"https://www.instagram.com/{username}/")
         wait_for_element(driver, By.TAG_NAME, "header")
-        time.sleep(random.uniform(1.0, 2.0))  # Let the header settle
 
         # Instagram answers a visit to some profiles with a page of suggestions.
         # Reading that would score this candidate on a stranger's bio.
@@ -3078,18 +3087,39 @@ def read_candidate_profile(username):
             logger.info(f"Asked for {username} and landed somewhere else, leaving it unscored")
             return nothing
 
-        raw = driver.execute_script(PROFILE_STATS_JS)
+        # Asked for repeatedly until the counts are in it, rather than waited out on
+        # a timer. The header element exists before its contents do, so something
+        # has to give the page a moment - but a fixed pause is the wrong shape for
+        # it, since it is both too long on nearly every profile and too short on the
+        # slow one. The counts are the sign that the header has filled in.
+        for attempt in range(12):
+            raw = driver.execute_script(PROFILE_STATS_JS) or {}
+            header_text = raw.get('headerText') or ""
+            if parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS) is not None:
+                break
+            time.sleep(0.25)
     except WebDriverException as e:
         logger.info(f"Could not read {username}: {type(e).__name__}")
         return nothing
     finally:
-        # The pass walks hundreds of profiles in a row, which is the sort of thing
-        # worth doing at the same unhurried pace as everything else here.
-        time.sleep(random.uniform(2.0, 4.0))
+        # Reading a profile is not following one, so this is a fraction of what the
+        # follow delays are, and it can be set to nothing. It is not zero by default
+        # because several hundred profile views in a row, as fast as a machine can
+        # ask for them, is the shape of the thing Instagram is watching for.
+        pace = max(0, CONFIG["SEMANTIC_READ_DELAY"])
+        if pace:
+            time.sleep(random.uniform(pace, pace * 2))
 
-    if not raw:
+    if not header_text:
+        # A header that never filled in is where a block would be showing, so this
+        # is the one place worth paying for the check - the page text it reads costs
+        # more than the pause above, which is why it is not run on every profile.
+        if check_rate_limit(driver):
+            log("⏸️ Instagram is throttling, waiting a minute before carrying on", 'warning')
+            time.sleep(60)
         return nothing
-    return None, None, profile_description(raw.get('headerText') or "")
+
+    return None, None, profile_description(header_text)
 
 
 def run_scoring_pass():
@@ -3127,7 +3157,7 @@ def run_scoring_pass():
     dropped = trim_queue()
     if dropped:
         log(
-            f"✂️ Queue held at {CONFIG['SEMANTIC_SHORTLIST']}: {dropped} candidates "
+            f"✂️ Queue held at {CONFIG['SEMANTIC_QUEUE_LIMIT']}: {dropped} candidates "
             f"left it. Their sighting counts are kept, so a later search that finds "
             f"them again picks up where this one left off",
             'info'
@@ -4976,8 +5006,14 @@ def setup_gui():
                       "← 0-100. How much of a candidate's rank is the niche rather "
                       "than how often they were seen. 0 is the old order")
     create_config_row(semantic_frame, 4, "SEMANTIC_SHORTLIST", "SEMANTIC_SHORTLIST",
-                      "← How many of the best candidates get read, and how long the "
-                      "queue is kept. One page load each")
+                      "← How many of the best candidates get read after a search. "
+                      "One page load each, so this is what the pass costs")
+    create_config_row(semantic_frame, 5, "SEMANTIC_QUEUE_LIMIT", "SEMANTIC_QUEUE_LIMIT",
+                      "← How long the queue is kept afterwards. Candidates past this "
+                      "leave the queue, keeping the sighting counts that got them there")
+    create_config_row(semantic_frame, 6, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
+                      "← Seconds between profiles while reading. 0 is as fast as the "
+                      "pages load")
 
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)

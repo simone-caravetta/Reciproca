@@ -429,6 +429,21 @@ class TrimQueueTest(unittest.TestCase):
         R.add_to_queue(["d"])
         self.assertEqual([R.queue_username(i) for i in R.load_queue()], ["d", "a"])
 
+    def test_reading_fewer_profiles_does_not_shorten_the_queue(self):
+        """The two used to be one setting, so testing the pass on fifteen profiles
+        would have cut the queue to fifteen. How long the queue is kept and how many
+        profiles are worth reading are not the same question."""
+        R.save_frequencies(R.Counter({str(n): n for n in range(1, 30)}))
+        R.add_to_queue([str(n) for n in range(1, 30)])
+        R.CONFIG["SEMANTIC_SHORTLIST"] = 5
+        R.CONFIG["SEMANTIC_QUEUE_LIMIT"] = 500
+        try:
+            self.assertEqual(R.trim_queue(), 0)
+            self.assertEqual(len(R.load_queue()), 29)
+        finally:
+            R.CONFIG["SEMANTIC_SHORTLIST"] = 200
+            R.CONFIG["SEMANTIC_QUEUE_LIMIT"] = 500
+
     def test_a_queue_shorter_than_the_cut_is_left_alone(self):
         R.save_frequencies(R.Counter({"a": 9, "b": 7}))
         R.add_to_queue(["a", "b"])
