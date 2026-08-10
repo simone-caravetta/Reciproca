@@ -4018,20 +4018,6 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         # Refresh queue display
         refresh_queue_display()
 
-    # The search has just left a queue longer than anyone will follow through, and
-    # nearly all of it on one sighting count, which is to say in a tie that count
-    # has no opinion about. Reading the strongest few hundred is what breaks it.
-    #
-    # This runs whether the search finished or was stopped. A search stopped early
-    # has still put everything it found into the queue, and that queue wants sorting
-    # exactly as much as a finished one does - arguably more, since it is the one
-    # that will be worked through next.
-    try:
-        run_scoring_pass(after_stop=stop_requested.is_set())
-    except Exception as e:
-        log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
-        logger.exception("The scoring pass failed")
-
     return ranked_users
 
 
@@ -4130,6 +4116,20 @@ def follow_logic():
             log(f"📋 Queue now has {total_count} users total", 'info')
             refresh_queue_display()
             update_live_extraction_display()
+
+            # Here, and not at the end of the search: the search is called with
+            # add_to_queue_limit=0, so until the line above ran, the users it found
+            # were not in the queue at all. Scoring before that read an empty queue,
+            # loaded the model for nothing and scored no one.
+            #
+            # Both answers that keep the results get scored, including the one that
+            # follows straight away - which is the whole point, since that is the
+            # run whose order the scoring changes.
+            try:
+                run_scoring_pass(after_stop=stop_requested.is_set())
+            except Exception as e:
+                log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
+                logger.exception("The scoring pass failed")
 
             if result:  # YES - Save to queue and STOP
                 log("🛑 Scraping complete. Start following manually when ready.", 'success')
