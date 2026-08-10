@@ -246,10 +246,18 @@ class RankFormulaTest(unittest.TestCase):
             worse = R.combined_rank(1, 0.30, weight)
             self.assertGreater(better, worse, weight)
 
-    def test_a_small_weight_leaves_a_real_gap_in_sightings_alone(self):
-        """Ordering the tie must not come at the price of overturning the count."""
+    def test_a_real_gap_in_sightings_still_takes_a_real_gap_in_affinity(self):
+        """The weight is a little more to the affinity, not a takeover: a candidate
+        seen six times is not overtaken by a hundredth of a point."""
         self.assertGreater(
-            R.combined_rank(6, 0.30, weight=30), R.combined_rank(1, 0.60, weight=30)
+            R.combined_rank(6, 0.45, weight=60), R.combined_rank(1, 0.50, weight=60)
+        )
+
+    def test_a_wide_gap_in_affinity_does_climb_a_step(self):
+        """Which is the thing the weight was raised for. At 30 this did not happen
+        at any affinity a real model produces."""
+        self.assertGreater(
+            R.combined_rank(1, 0.60, weight=60), R.combined_rank(2, 0.40, weight=60)
         )
 
     def test_the_shipped_default_is_one_that_orders_ties(self):

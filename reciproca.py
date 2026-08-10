@@ -72,7 +72,7 @@ CONFIG = {
     # Semantic ranking - how close a candidate's profile reads to the niche you
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
-    "SEMANTIC_WEIGHT": 30,                  # 0-100. See combined_rank() for what it buys
+    "SEMANTIC_WEIGHT": 60,                  # 0-100. See combined_rank() for what it buys
     "SEMANTIC_SHORTLIST": 200,              # How many top candidates get scored
     "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
@@ -596,7 +596,7 @@ def load_config():
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
         "SEMANTIC_ENABLED": 1,
-        "SEMANTIC_WEIGHT": 30,
+        "SEMANTIC_WEIGHT": 60,
         "SEMANTIC_SHORTLIST": 200,
         "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
@@ -753,14 +753,27 @@ def combined_rank(frequency, affinity, weight):
 
     Most of the queue sits on the same count, since most candidates are seen once,
     and any weight above zero is enough to order all of those: the affinity is the
-    only thing telling them apart. What the weight really sets is how far up an
-    affinity can carry somebody past a candidate seen more often. It takes about 60
-    for a profile reading 0.65 to overtake one seen six times reading 0.30.
+    only thing telling them apart. What the weight really sets is something else -
+    how far up an affinity can carry somebody past a candidate seen more often.
 
-    So the default is not 0. The order within a tie is drawn from the username
-    today, which is to say it is arbitrary, and replacing an arbitrary order with a
-    measured one risks nothing: where the measurement is poor, it is arbitrary
-    again, which is where it started.
+    That is where the number is decided, and it is not where it looks. The affinity
+    gap needed to climb one step of the count:
+
+                            at 30      at 60
+        seen 2 over 1        0.39       0.11
+        seen 3 over 1        0.62       0.18
+        seen 6 over 1        0.97       0.28
+
+    Real affinities sit within a few hundredths of each other, not within four
+    tenths, so at 30 the steps are effectively sealed: the affinity would sort
+    inside each of them and never move anybody between them, which is most of what
+    it was brought in to do. At 60 the two genuinely mix, and it still takes a real
+    gap rather than noise.
+
+    So 60 is the default: a little more to the affinity than to the count, rather
+    than a takeover. If the scores come back all within a hundredth of each other,
+    that is the model failing to tell people apart, and the answer is a better
+    description of the niche before it is a smaller weight.
 
     A candidate with no affinity keeps the sighting count as their whole score.
     Not zero: the queue holds people from before any of this existed, and a scoring
