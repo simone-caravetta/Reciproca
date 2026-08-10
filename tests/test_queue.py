@@ -295,5 +295,138 @@ class QueueAffinityTest(unittest.TestCase):
             self.assertIsNone(R.queue_affinity({"username": "x", "affinity": value}), value)
 
 
+
+class ScoringPassTest(unittest.TestCase):
+    """The pass that reads profiles and gives them an affinity.
+
+    Driven with a stand-in scorer: what is under test is which candidates get
+    visited, what is kept, and what survives being stopped half way.
+    """
+
+    def setUp(self):
+        workdir = tempfile.mkdtemp()
+        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+        R.last_scrape_frequencies = None
+        _stubs.install_fake_ui(R)
+        self.visited = []
+
+    def scorer(self, scores):
+        def score(username):
+            self.visited.append(username)
+            value = scores.get(username, 0.5)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return score
+
+    def queue_now(self):
+        return {R.queue_username(i): R.queue_affinity(i) for i in R.load_queue()}
+
+    def test_it_visits_the_top_of_the_queue_and_stops_there(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7, "c": 5, "d": 3}))
+        R.add_to_queue(["a", "b", "c", "d"])
+
+        R.score_queue(self.scorer({}), limit=2)
+        self.assertEqual(self.visited, ["a", "b"])
+        self.assertIsNone(self.queue_now()["c"], "below the cut, so left alone")
+
+    def test_a_score_is_kept_so_a_second_pass_is_cheaper(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        self.assertEqual(R.score_queue(self.scorer({}), limit=10), 2)
+        self.visited.clear()
+        self.assertEqual(R.score_queue(self.scorer({}), limit=10), 0)
+        self.assertEqual(self.visited, [], "nobody is read twice")
+
+    def test_an_unreadable_profile_leaves_the_candidate_unscored(self):
+        """Not scored zero. A page that failed to load is not evidence about
+        anybody, and zero would bury them under everyone who happened to load."""
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        R.score_queue(self.scorer({"a": None}), limit=10)
+        self.assertIsNone(self.queue_now()["a"])
+        self.assertEqual(self.queue_now()["b"], 0.5)
+
+    def test_a_scorer_that_raises_does_not_end_the_pass(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        R.score_queue(self.scorer({"a": RuntimeError("boom")}), limit=10)
+        self.assertIsNone(self.queue_now()["a"])
+        self.assertEqual(self.queue_now()["b"], 0.5, "the next candidate is still read")
+
+    def test_stopping_keeps_what_it_has_and_discards_nobody(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7, "c": 5}))
+        R.add_to_queue(["a", "b", "c"])
+
+        def score(username):
+            self.visited.append(username)
+            R.stop_requested.set()      # as if Stop were pressed during the first read
+            return 0.8
+
+        R.score_queue(score, limit=10)
+        R.stop_requested.clear()
+
+        queue = self.queue_now()
+        self.assertEqual(queue["a"], 0.8, "the one already read is written down")
+        self.assertEqual(set(queue), {"a", "b", "c"}, "nobody is dropped for being unread")
+
+    def test_an_entry_written_by_an_older_version_can_still_be_scored(self):
+        R.save_queue(["a", "b"])
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.last_scrape_frequencies = None
+
+        R.score_queue(self.scorer({}), limit=10)
+        self.assertEqual(self.queue_now(), {"a": 0.5, "b": 0.5})
+
+    def test_an_empty_queue_reads_nothing(self):
+        self.assertEqual(R.score_queue(self.scorer({}), limit=10), 0)
+        self.assertEqual(self.visited, [])
+
+
+class TrimQueueTest(unittest.TestCase):
+    """A search adds thousands and a session follows a few dozen, so without a cut
+    the far end of the queue is people nobody will reach this year."""
+
+    def setUp(self):
+        workdir = tempfile.mkdtemp()
+        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+        R.last_scrape_frequencies = None
+        _stubs.install_fake_ui(R)
+
+    def test_it_keeps_the_best_and_drops_the_rest(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7, "c": 5, "d": 3}))
+        R.add_to_queue(["a", "b", "c", "d"])
+
+        self.assertEqual(R.trim_queue(limit=2), 2)
+        self.assertEqual([R.queue_username(i) for i in R.load_queue()], ["a", "b"])
+
+    def test_a_dropped_candidate_keeps_the_count_that_got_them_there(self):
+        """Out of the queue is not out of the record. A later search that runs into
+        them again finds them where they were, not back at the beginning."""
+        R.save_frequencies(R.Counter({"a": 9, "d": 3}))
+        R.add_to_queue(["a", "d"])
+        R.trim_queue(limit=1)
+
+        self.assertEqual(dict(R.load_frequencies()), {"a": 9, "d": 3})
+
+        R.save_frequencies(R.load_frequencies() + R.Counter({"d": 8}))
+        R.last_scrape_frequencies = None
+        R.add_to_queue(["d"])
+        self.assertEqual([R.queue_username(i) for i in R.load_queue()], ["d", "a"])
+
+    def test_a_queue_shorter_than_the_cut_is_left_alone(self):
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+        self.assertEqual(R.trim_queue(limit=50), 0)
+        self.assertEqual(len(R.load_queue()), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

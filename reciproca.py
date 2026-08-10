@@ -889,6 +889,126 @@ def validate_queue():
 
     return len(queue) - len(validated_queue), len(validated_queue)
 
+
+# ---------------------------
+# SCORING PASS
+# ---------------------------
+# What a search leaves behind is a queue far longer than anyone will ever follow
+# through: thousands of candidates, most of them seen exactly once, which is to say
+# most of them in a tie the sighting count has no opinion about. Reading a profile
+# is what breaks that tie, and reading a profile costs a page load, so the pass runs
+# over the strongest few hundred rather than over everything.
+
+def scoring_shortlist(queue, limit, frequencies=None):
+    """The candidates a scoring pass should visit, best first.
+
+    The top `limit` by rank, less anyone already carrying an affinity. A score is
+    kept with the candidate, so a second pass over the same queue pays only for
+    whoever has arrived since the first.
+
+    Candidates below the cut are not scored and not judged: they keep their place
+    and their count, and a later search that pushes them up gets them scored then.
+    """
+    ranked = rank_queue(queue, frequencies)[:max(0, limit)]
+    return [(username, item) for username, _, item in ranked if queue_affinity(item) is None]
+
+
+def with_affinity(item, username, affinity):
+    """The queue entry, carrying its affinity.
+
+    Entries written by older versions are plain usernames with nowhere to put a
+    score, so those become dicts here rather than being skipped.
+    """
+    entry = dict(item) if isinstance(item, dict) else {'username': username}
+    entry['affinity'] = affinity
+    return entry
+
+
+def score_queue(scorer, limit=None, frequencies=None, on_progress=None):
+    """Give an affinity to the best unscored candidates. Returns how many got one.
+
+    `scorer` takes a username and returns a number between 0 and 1, or None where
+    the profile could not be read. None leaves the candidate unscored rather than
+    scoring them zero: an unknown is not a bad result, and scoring it as one would
+    bury somebody for a page that failed to load.
+
+    The queue is written after every candidate, so stopping the pass keeps what it
+    has already done and the next one starts from there. Stopping is not a way of
+    discarding anybody either: whoever is left unscored stays in the queue, ranked
+    on their count as before.
+    """
+    if limit is None:
+        limit = CONFIG["SEMANTIC_SHORTLIST"]
+
+    queue = load_queue()
+    shortlist = scoring_shortlist(queue, limit, frequencies)
+    if not shortlist:
+        return 0
+
+    log(f"🧭 Reading {len(shortlist)} profiles to score them against your niche", 'info')
+
+    positions = {}
+    for index, item in enumerate(queue):
+        username = queue_username(item)
+        if username is not None and username not in positions:
+            positions[username] = index
+
+    scored = 0
+    for number, (username, item) in enumerate(shortlist, 1):
+        if stop_requested.is_set():
+            log(f"⏹️ Scoring stopped after {scored} of {len(shortlist)}", 'warning')
+            break
+
+        if on_progress:
+            on_progress(number, len(shortlist), username)
+
+        try:
+            affinity = scorer(username)
+        except Exception as e:
+            log(f"❌ Could not score {username}: {brief_error(e)}", 'error')
+            logger.debug(f"Scoring error on {username}", exc_info=True)
+            continue
+
+        if affinity is None:
+            logger.info(f"No affinity for {username}: nothing readable on the profile")
+            continue
+
+        index = positions.get(username)
+        if index is None:
+            continue
+
+        queue[index] = with_affinity(item, username, affinity)
+        save_queue(queue)
+        scored += 1
+        logger.info(f"Affinity for {username}: {affinity:.2f}")
+
+    return scored
+
+
+def trim_queue(limit=None, frequencies=None):
+    """Keep the best `limit` candidates, drop the rest. Returns how many were let go.
+
+    The sighting counts are deliberately left alone. A candidate dropped here is out
+    of the queue, not out of the record: the count that got them there stays on
+    file, so a later search that runs into them again finds them where they were
+    rather than back at the beginning, and they may well come back above the cut.
+
+    Without this the queue only grows. A search adds thousands and a session
+    follows a few dozen, so the far end of the list is candidates nobody will reach
+    this year, slowing every redraw and every ranking on the way past.
+    """
+    if limit is None:
+        limit = CONFIG["SEMANTIC_SHORTLIST"]
+
+    queue = load_queue()
+    ranked = rank_queue(queue, frequencies)
+    if len(ranked) <= limit:
+        return 0
+
+    save_queue([item for _, _, item in ranked[:limit]])
+    return len(ranked) - limit
+
+
 def log_followed_user(username, status="success"):
     """Log a followed user to history."""
     try:
