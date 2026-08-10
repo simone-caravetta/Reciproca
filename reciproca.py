@@ -73,8 +73,7 @@ CONFIG = {
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
     "SEMANTIC_WEIGHT": 60,                  # 0-100. See combined_rank() for what it buys
-    "SEMANTIC_SHORTLIST": 200,              # How many top candidates get read
-    "SEMANTIC_QUEUE_LIMIT": 500,            # How long the queue is kept afterwards
+    "SEMANTIC_TOP_K": 200,                  # Candidates kept after a search, and read
     "SEMANTIC_READ_DELAY": 1,               # Seconds between profiles, 0 for none
     "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
@@ -599,8 +598,7 @@ def load_config():
         "BOT_MAX_FOLLOWING_RATIO": 5,
         "SEMANTIC_ENABLED": 1,
         "SEMANTIC_WEIGHT": 60,
-        "SEMANTIC_SHORTLIST": 200,
-        "SEMANTIC_QUEUE_LIMIT": 500,
+        "SEMANTIC_TOP_K": 200,
         "SEMANTIC_READ_DELAY": 1,
         "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
@@ -968,7 +966,7 @@ def score_queue(scorer, limit=None, frequencies=None, on_progress=None):
     on their count as before.
     """
     if limit is None:
-        limit = CONFIG["SEMANTIC_SHORTLIST"]
+        limit = CONFIG["SEMANTIC_TOP_K"]
 
     queue = load_queue()
     shortlist = scoring_shortlist(queue, limit, frequencies)
@@ -1033,7 +1031,7 @@ def trim_queue(limit=None, frequencies=None):
     and not one that announces itself.
     """
     if limit is None:
-        limit = CONFIG["SEMANTIC_QUEUE_LIMIT"]
+        limit = CONFIG["SEMANTIC_TOP_K"]
 
     queue = load_queue()
     ranked = rank_queue(queue, frequencies)
@@ -3146,6 +3144,19 @@ def run_scoring_pass():
         log("ℹ️ Semantic ranking is off, the queue keeps its order by sightings", 'info')
         return
 
+    # Held to size first, then every one of those read. The other way round - read
+    # the best few hundred, then keep more of them than that - leaves a queue where
+    # some entries have been read and some have not, and those two are not ordered
+    # on the same thing. One number, and everybody in the queue has been looked at.
+    dropped = trim_queue()
+    if dropped:
+        log(
+            f"✂️ Kept the top {CONFIG['SEMANTIC_TOP_K']}, so {dropped} candidates "
+            f"left the queue. Their sighting counts stay on file, so a later search "
+            f"that finds them again picks up where this one left off",
+            'info'
+        )
+
     def on_progress(number, total, username):
         if number == 1 or number % 25 == 0:
             log(f"🧭 Scoring {number}/{total}...", 'info')
@@ -3153,15 +3164,6 @@ def run_scoring_pass():
     scored = score_queue(scorer, on_progress=on_progress)
     if scored:
         log(f"🧭 Scored {scored} profiles against your niche", 'success')
-
-    dropped = trim_queue()
-    if dropped:
-        log(
-            f"✂️ Queue held at {CONFIG['SEMANTIC_QUEUE_LIMIT']}: {dropped} candidates "
-            f"left it. Their sighting counts are kept, so a later search that finds "
-            f"them again picks up where this one left off",
-            'info'
-        )
 
     try:
         refresh_queue_display()
@@ -4543,6 +4545,27 @@ def setup_gui():
         value='queue'
     ).pack(anchor='w', pady=2)
 
+    # Scoring is a phase between the search and the following, and nothing either
+    # side of it depends on having happened. So it gets a switch here rather than a
+    # number in the settings: it is the sort of thing to change your mind about
+    # while looking at the tab you start a search from.
+    semantic_var = tk.IntVar(value=1 if CONFIG["SEMANTIC_ENABLED"] else 0)
+
+    def toggle_semantic():
+        CONFIG["SEMANTIC_ENABLED"] = semantic_var.get()
+        save_config(CONFIG)
+        if semantic_var.get():
+            log("🧭 Profiles will be scored against your niche after a search", 'info')
+        else:
+            log("🧭 Scoring off - the queue keeps its order by sightings", 'info')
+
+    ttk.Checkbutton(
+        mode_frame,
+        text='🧭 Score profiles against my niche after the search',
+        variable=semantic_var,
+        command=toggle_semantic
+    ).pack(anchor='w', pady=(6, 0))
+
     main_queue_info = ttk.Label(
         mode_frame,
         text=f"Queue: {len(load_queue())} users waiting",
@@ -5000,20 +5023,21 @@ def setup_gui():
         "A model reads it the way it reads a bio, so it works better that way: "
         "\"fotografi che scattano su pellicola e mostrano il loro lavoro\""
     )
-    create_config_row(semantic_frame, 2, "SEMANTIC_ENABLED", "SEMANTIC_ENABLED",
-                      "← 1 to read the top of the queue after a search, 0 to skip it")
-    create_config_row(semantic_frame, 3, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
+    create_config_row(semantic_frame, 2, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
                       "← 0-100. How much of a candidate's rank is the niche rather "
-                      "than how often they were seen. 0 is the old order")
-    create_config_row(semantic_frame, 4, "SEMANTIC_SHORTLIST", "SEMANTIC_SHORTLIST",
-                      "← How many of the best candidates get read after a search. "
-                      "One page load each, so this is what the pass costs")
-    create_config_row(semantic_frame, 5, "SEMANTIC_QUEUE_LIMIT", "SEMANTIC_QUEUE_LIMIT",
-                      "← How long the queue is kept afterwards. Candidates past this "
-                      "leave the queue, keeping the sighting counts that got them there")
-    create_config_row(semantic_frame, 6, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
+                      "than how often they were seen. 0 is the order without it")
+    create_config_row(semantic_frame, 3, "SEMANTIC_TOP_K", "SEMANTIC_TOP_K",
+                      "← Candidates kept after a search. Every one of them is read, "
+                      "one page load each, so this is what the pass costs")
+    create_config_row(semantic_frame, 4, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
                       "← Seconds between profiles while reading. 0 is as fast as the "
                       "pages load")
+
+    ttk.Label(
+        semantic_frame,
+        text="Switched on and off from the Auto Follow tab, next to the mode.",
+        foreground='gray', font=('Helvetica', 8)
+    ).grid(row=5, column=0, columnspan=3, sticky='w', pady=(8, 0))
 
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)

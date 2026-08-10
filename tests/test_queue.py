@@ -429,20 +429,20 @@ class TrimQueueTest(unittest.TestCase):
         R.add_to_queue(["d"])
         self.assertEqual([R.queue_username(i) for i in R.load_queue()], ["d", "a"])
 
-    def test_reading_fewer_profiles_does_not_shorten_the_queue(self):
-        """The two used to be one setting, so testing the pass on fifteen profiles
-        would have cut the queue to fifteen. How long the queue is kept and how many
-        profiles are worth reading are not the same question."""
+    def test_everything_kept_is_something_that_gets_read(self):
+        """One number does both jobs on purpose. Keeping more than gets read would
+        leave a queue where some entries have been looked at and some have not, and
+        those two are not ordered on the same thing."""
         R.save_frequencies(R.Counter({str(n): n for n in range(1, 30)}))
         R.add_to_queue([str(n) for n in range(1, 30)])
-        R.CONFIG["SEMANTIC_SHORTLIST"] = 5
-        R.CONFIG["SEMANTIC_QUEUE_LIMIT"] = 500
+        R.CONFIG["SEMANTIC_TOP_K"] = 5
         try:
-            self.assertEqual(R.trim_queue(), 0)
-            self.assertEqual(len(R.load_queue()), 29)
+            R.trim_queue()
+            kept = [R.queue_username(i) for i in R.load_queue()]
+            self.assertEqual(len(kept), 5)
+            self.assertEqual(kept, ["29", "28", "27", "26", "25"], "the best by count")
         finally:
-            R.CONFIG["SEMANTIC_SHORTLIST"] = 200
-            R.CONFIG["SEMANTIC_QUEUE_LIMIT"] = 500
+            R.CONFIG["SEMANTIC_TOP_K"] = 200
 
     def test_a_queue_shorter_than_the_cut_is_left_alone(self):
         R.save_frequencies(R.Counter({"a": 9, "b": 7}))

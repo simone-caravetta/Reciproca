@@ -305,7 +305,7 @@ class NicheSettingTest(unittest.TestCase):
         and the merge with the defaults is what keeps that from being a crash."""
         R.save_config({"BOT_MIN_POSTS": 3})
         loaded = R.load_config()
-        for key in ("SEMANTIC_NICHE", "SEMANTIC_ENABLED", "SEMANTIC_WEIGHT", "SEMANTIC_SHORTLIST"):
+        for key in ("SEMANTIC_NICHE", "SEMANTIC_ENABLED", "SEMANTIC_WEIGHT", "SEMANTIC_TOP_K"):
             self.assertIn(key, loaded, key)
         self.assertEqual(loaded["BOT_MIN_POSTS"], 3, "what was saved is still there")
 
