@@ -952,7 +952,7 @@ def with_affinity(item, username, affinity):
     return entry
 
 
-def score_queue(scorer, limit=None, frequencies=None, on_progress=None):
+def score_queue(scorer, limit=None, frequencies=None, on_progress=None, stop_event=None):
     """Give an affinity to the best unscored candidates. Returns how many got one.
 
     `scorer` takes a username and returns a number between 0 and 1, or None where
@@ -967,6 +967,8 @@ def score_queue(scorer, limit=None, frequencies=None, on_progress=None):
     """
     if limit is None:
         limit = CONFIG["SEMANTIC_TOP_K"]
+    if stop_event is None:
+        stop_event = scoring_stop
 
     queue = load_queue()
     shortlist = scoring_shortlist(queue, limit, frequencies)
@@ -983,7 +985,7 @@ def score_queue(scorer, limit=None, frequencies=None, on_progress=None):
 
     scored = 0
     for number, (username, item) in enumerate(shortlist, 1):
-        if stop_requested.is_set():
+        if stop_event.is_set():
             log(f"⏹️ Scoring stopped after {scored} of {len(shortlist)}", 'warning')
             break
 
@@ -1465,6 +1467,14 @@ browser_opening = threading.Event()
 # Selenium session and the same window, so only one may run at a time.
 session_running = threading.Event()
 stop_requested = threading.Event()
+
+# Stopping the search does not mean skipping the scoring that follows it, so the
+# scoring watches a flag of its own. Stop sets both; the scoring pass clears its own
+# as it starts, which is what lets it run on a search that was cut short. A second
+# press then stops the scoring too, and stop_requested is never cleared behind the
+# user's back - so a search stopped by hand stays stopped, and so does the following
+# that would otherwise have come after it.
+scoring_stop = threading.Event()
 active_threads = []
 # Live extraction tracking
 live_extracted_users = []  # Track users as they're extracted
@@ -1865,6 +1875,7 @@ def watch_browser():
 def stop_bot():
     """Request graceful stop."""
     stop_requested.set()
+    scoring_stop.set()
     log("⏹️ Stop requested, finishing current operation...", 'warning')
     # Both tabs' Stop buttons come here, so both acknowledge the click. The session
     # itself keeps running until it reaches a checkpoint.
@@ -3120,12 +3131,18 @@ def read_candidate_profile(username):
     return None, None, profile_description(header_text)
 
 
-def run_scoring_pass():
-    """Score the strongest candidates in the queue, then hold the queue to size.
+def run_scoring_pass(after_stop=False):
+    """Hold the queue to size, then read and score everyone left in it.
 
     Runs at the end of a search rather than during a follow session. The browser is
     already up and already reading heavily here, and a follow session stays exactly
     as quick as it has always been.
+
+    `after_stop` says the search was cut short by hand. That is not a reason to skip
+    this: a stopped search has still put everything it found into the queue, and
+    that queue wants sorting as much as a finished one does - more, really, since it
+    is the one about to be worked through. So the pass gets its own stop flag and
+    clears it here, and the next press of Stop is what ends the scoring as well.
 
     Every way of not being able to score leaves the queue ordered on sighting counts
     alone, which is what it was ordered on before any of this existed. None of them
@@ -3133,6 +3150,10 @@ def run_scoring_pass():
     """
     if not CONFIG["SEMANTIC_ENABLED"]:
         return
+
+    scoring_stop.clear()
+    if after_stop:
+        log("🧭 Search stopped. Scoring what it found - press Stop again to skip", 'info')
 
     niche = str(CONFIG.get("SEMANTIC_NICHE") or "").strip()
     if not niche:
@@ -4000,12 +4021,16 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
     # The search has just left a queue longer than anyone will follow through, and
     # nearly all of it on one sighting count, which is to say in a tie that count
     # has no opinion about. Reading the strongest few hundred is what breaks it.
-    if not stop_requested.is_set():
-        try:
-            run_scoring_pass()
-        except Exception as e:
-            log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
-            logger.exception("The scoring pass failed")
+    #
+    # This runs whether the search finished or was stopped. A search stopped early
+    # has still put everything it found into the queue, and that queue wants sorting
+    # exactly as much as a finished one does - arguably more, since it is the one
+    # that will be worked through next.
+    try:
+        run_scoring_pass(after_stop=stop_requested.is_set())
+    except Exception as e:
+        log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
+        logger.exception("The scoring pass failed")
 
     return ranked_users
 

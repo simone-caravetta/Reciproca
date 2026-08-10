@@ -373,15 +373,32 @@ class ScoringPassTest(unittest.TestCase):
 
         def score(username):
             self.visited.append(username)
-            R.stop_requested.set()      # as if Stop were pressed during the first read
+            R.scoring_stop.set()        # as if Stop were pressed during the first read
             return 0.8
 
         R.score_queue(score, limit=10)
-        R.stop_requested.clear()
+        R.scoring_stop.clear()
 
         queue = self.queue_now()
         self.assertEqual(queue["a"], 0.8, "the one already read is written down")
         self.assertEqual(set(queue), {"a", "b", "c"}, "nobody is dropped for being unread")
+
+    def test_a_search_that_was_stopped_still_gets_its_queue_scored(self):
+        """Stopping the search is not asking for the queue to be left unsorted. The
+        two have separate flags, and the scoring clears its own as it starts - so
+        stopping the search never restarts anything else that was stopped with it."""
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        R.stop_requested.set()          # the search was stopped by hand
+        R.scoring_stop.set()
+        try:
+            R.run_scoring_pass(after_stop=True)     # clears its own flag, not the other
+            self.assertEqual(R.score_queue(self.scorer({}), limit=10), 2)
+            self.assertTrue(R.stop_requested.is_set(), "the search stays stopped")
+        finally:
+            R.stop_requested.clear()
+            R.scoring_stop.clear()
 
     def test_an_entry_written_by_an_older_version_can_still_be_scored(self):
         R.save_queue(["a", "b"])
