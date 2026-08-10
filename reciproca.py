@@ -4,6 +4,7 @@ Unified GUI tool: queue-based/hashtag follow, unfollow of non-followers
 (from an Instagram data export), rate limit detection, and persistent state.
 """
 
+import hashlib
 import json
 import logging
 import functools
@@ -67,6 +68,13 @@ CONFIG = {
     "BOT_MIN_FOLLOWERS": 10,
     "BOT_MAX_FOLLOWING": 3000,
     "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
+
+    # Semantic ranking - how close a candidate's profile reads to the niche you
+    # describe, scored after a search on the strongest candidates it found.
+    "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
+    "SEMANTIC_WEIGHT": 0,                   # 0-100. At 0 the queue keeps today's order
+    "SEMANTIC_SHORTLIST": 200,              # How many top candidates get scored
+    "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
     # Unfollow delays - same conservative philosophy as follow
     "UNFOLLOW_DELAY_MIN": 15,               # Minimum seconds between unfollows
@@ -574,6 +582,10 @@ def load_config():
         "BOT_MIN_FOLLOWERS": 10,
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
+        "SEMANTIC_ENABLED": 1,
+        "SEMANTIC_WEIGHT": 0,
+        "SEMANTIC_SHORTLIST": 200,
+        "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
         "UNFOLLOW_DELAY_MAX": 30,
         "UNFOLLOW_DAILY_LIMIT": 20,
@@ -684,10 +696,84 @@ def ranking_frequencies():
     return last_scrape_frequencies
 
 
+# Where the halfway point of the sighting scale falls: a candidate seen this many
+# times scores 0.5. Two says that being seen twice rather than once is the step that
+# matters, and that the difference between twenty and twenty-one is not.
+FREQUENCY_HALFWAY = 2
+
+
+def frequency_score(frequency):
+    """A sighting count as a number between 0 and 1, as f / (f + FREQUENCY_HALFWAY).
+
+    Three things this shape has to do. It has to keep the order the count already
+    gave, so that weighing affinity at zero leaves the queue exactly as it is today.
+    It has to fit between 0 and 1, so it can be mixed with an affinity at all. And
+    the steps have to shrink: 1 to 2 is worth a lot, 20 to 21 is worth nothing, which
+    is how the count behaves in fact.
+
+    Fixed rather than measured against the batch it arrived in. Scaling a candidate
+    against the 200 around it would give the same person a different number in the
+    next search, and the queue outlives any one search.
+    """
+    frequency = max(0, frequency or 0)
+    return frequency / (frequency + FREQUENCY_HALFWAY)
+
+
+def queue_affinity(item):
+    """How close this candidate's profile read to the niche, or None if unscored."""
+    if isinstance(item, dict):
+        value = item.get('affinity')
+        return value if isinstance(value, (int, float)) else None
+    return None
+
+
+def combined_rank(frequency, affinity, weight):
+    """The one number a candidate is ordered by, between 0 and 1.
+
+    `weight` is how much of it the affinity is worth, 0 to 100:
+
+        rank = (1 - weight/100) * frequency_score + (weight/100) * affinity
+
+    At 0 it is the sighting count and nothing else, so scoring can be switched on
+    and watched for a while without it moving anybody. At 100 the count stops
+    counting.
+
+    A candidate with no affinity keeps the sighting count as their whole score.
+    Not zero: the queue holds people from before any of this existed, and a scoring
+    pass can be stopped half way, and scoring them zero would bury them under
+    anyone who happened to be measured. An unknown is not a bad result, which is
+    the rule the bot filter already goes by.
+    """
+    counted = frequency_score(frequency)
+    if affinity is None:
+        return counted
+
+    share = min(max(weight or 0, 0), 100) / 100
+    return (1 - share) * counted + share * affinity
+
+
+def tie_breaker(username):
+    """A stable, name-independent order for candidates on the same score.
+
+    Most candidates are seen exactly once, so most of the queue is tied, and ties
+    used to break on the username. That sorted the same names to the top of every
+    batch, which does not matter while the order is only shown - and matters a lot
+    once the top of the queue is the part that gets scored, since the sample would
+    have been an alphabetical slice rather than a fair draw from the tie.
+
+    Drawn from the name rather than stored, so it is the same on every run and
+    entries written by older versions have one too. Not drawn afresh per sort: the
+    list would reshuffle under the cursor every time the window redrew.
+    """
+    return hashlib.sha1((username or "").encode('utf-8')).hexdigest()
+
+
 def rank_queue(queue, frequencies=None):
     """Queue entries ordered by rank, highest first.
 
-    Returns a list of (username, rank, item) triples.
+    Returns a list of (username, rank, item) triples, where rank is the one number
+    a candidate is judged on: their sighting count and, once they have been scored,
+    how close their profile read to the niche. See combined_rank().
 
     This is the single definition of the queue's order. The listbox draws it and
     follow_from_queue consumes it, so the account followed next is always the
@@ -695,18 +781,24 @@ def rank_queue(queue, frequencies=None):
     sorted by rank while the follow loop walked the file in insertion order -
     which made the ranking decorative: it was shown but never acted on.
 
-    Ties break on username so the order stays stable between redraws.
+    Ties break on a number drawn from the username rather than on the username
+    itself, so the order is stable between redraws without being alphabetical.
     """
     if frequencies is None:
         frequencies = ranking_frequencies()
+
+    weight = CONFIG["SEMANTIC_WEIGHT"]
 
     ranked = []
     for item in queue:
         username = queue_username(item)
         if username:
-            ranked.append((username, frequencies.get(username, 0), item))
+            rank = combined_rank(
+                frequencies.get(username, 0), queue_affinity(item), weight
+            )
+            ranked.append((username, rank, item))
 
-    ranked.sort(key=lambda entry: (-entry[1], entry[0]))
+    ranked.sort(key=lambda entry: (-entry[1], tie_breaker(entry[0])))
     return ranked
 
 
@@ -3430,8 +3522,18 @@ def refresh_queue_display():
     # reconstruct the ordering and cannot disagree with what is on screen.
     displayed_queue_usernames = [username for username, _, _ in ranked[:100]]
 
-    for user, rank, _ in ranked[:100]:  # Show first 100
-        queue_listbox.insert(tk.END, f"[{rank}] {user}" if rank > 0 else user)
+    # The row says what the order is made of, not the number it comes out as: how
+    # many scanned authors this candidate follows, and how close their profile read
+    # to the niche where that has been measured. A single 0.61 on screen would sort
+    # the list correctly and tell you nothing about why.
+    frequencies = ranking_frequencies()
+    for user, _, item in ranked[:100]:  # Show first 100
+        seen = frequencies.get(user, 0)
+        affinity = queue_affinity(item)
+        parts = [str(seen)] if seen else []
+        if affinity is not None:
+            parts.append(f"{affinity:.0%}")
+        queue_listbox.insert(tk.END, f"[{' · '.join(parts)}] {user}" if parts else user)
 
     if len(ranked) > 100:
         queue_listbox.insert(tk.END, f"... and {len(ranked) - 100} more")
