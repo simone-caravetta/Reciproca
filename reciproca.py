@@ -4576,11 +4576,40 @@ def setup_gui():
     # while looking at the tab you start a search from.
     semantic_var = tk.IntVar(value=1 if CONFIG["SEMANTIC_ENABLED"] else 0)
 
+    # The niche belongs here rather than in the settings: it is the question the
+    # scoring asks, so it is read and changed at the same moment as the switch that
+    # turns the scoring on, not two tabs away among the numbers.
+    niche_frame = ttk.Frame(mode_frame)
+    niche_label = ttk.Label(niche_frame, text='Niche:')
+    niche_entry = ttk.Entry(niche_frame)
+    niche_entry.insert(0, str(CONFIG.get("SEMANTIC_NICHE") or ""))
+
+    def save_niche(event=None):
+        """Keep what was typed. Bound to leaving the field and to pressing Enter."""
+        typed = niche_entry.get().strip()
+        if typed != str(CONFIG.get("SEMANTIC_NICHE") or ""):
+            CONFIG["SEMANTIC_NICHE"] = typed
+            save_config(CONFIG)
+            log(f"🧭 Niche set to: {typed}" if typed else "🧭 Niche cleared", 'info')
+
+    niche_entry.bind('<FocusOut>', save_niche)
+    niche_entry.bind('<Return>', save_niche)
+
     def toggle_semantic():
-        CONFIG["SEMANTIC_ENABLED"] = semantic_var.get()
+        on = bool(semantic_var.get())
+        CONFIG["SEMANTIC_ENABLED"] = 1 if on else 0
         save_config(CONFIG)
-        if semantic_var.get():
+
+        # Nothing to describe while the scoring is off, so the field says so by
+        # being unusable rather than by sitting there inviting an answer to a
+        # question nobody is going to ask.
+        niche_entry.config(state='normal' if on else 'disabled')
+        niche_label.config(foreground='' if on else 'gray')
+
+        if on:
             log("🧭 Profiles will be scored against your niche after a search", 'info')
+            if not str(CONFIG.get("SEMANTIC_NICHE") or "").strip():
+                log("   Describe who you are looking for in the Niche box", 'info')
         else:
             log("🧭 Scoring off - the queue keeps its order by sightings", 'info')
 
@@ -4590,6 +4619,21 @@ def setup_gui():
         variable=semantic_var,
         command=toggle_semantic
     ).pack(anchor='w', pady=(6, 0))
+
+    niche_frame.pack(fill='x', pady=(2, 0), padx=(20, 0))
+    niche_label.pack(side='left', padx=(0, 5))
+    niche_entry.pack(side='left', fill='x', expand=True)
+    ToolTip(
+        niche_entry,
+        "Who you are looking for, as a sentence rather than keywords - the model "
+        "reads it the way it reads a bio.\n"
+        "Example: fotografi che scattano su pellicola e mostrano il loro lavoro"
+    )
+
+    # Match the field to the switch as it is drawn, not only when it is clicked.
+    if not semantic_var.get():
+        niche_entry.config(state='disabled')
+        niche_label.config(foreground='gray')
 
     main_queue_info = ttk.Label(
         mode_frame,
@@ -4942,7 +4986,6 @@ def setup_gui():
 
     # Dictionary to hold config entry widgets
     config_entries = {}
-    config_text_entries = {}
 
     def create_config_row(parent, row, label, config_key, description, is_password=False, validate=True):
         """Helper to create a labeled config row with entry field."""
@@ -4964,27 +5007,6 @@ def setup_gui():
         config_entries[config_key] = entry
         return entry
 
-    def create_text_row(parent, row, label, config_key, description):
-        """A setting that is words rather than a number, so it gets room to be read.
-
-        Kept apart from the numbered rows because saving them converts every entry
-        to an integer, and a sentence put through that would take the whole save
-        down with it.
-        """
-        ttk.Label(parent, text=f'{label}:', font=('Helvetica', 9, 'bold')).grid(
-            row=row, column=0, sticky='w', pady=3, padx=(0, 5)
-        )
-
-        entry = ttk.Entry(parent, width=60)
-        entry.insert(0, str(CONFIG.get(config_key, "")))
-        entry.grid(row=row, column=1, columnspan=2, sticky='we', pady=3, padx=5)
-
-        ttk.Label(parent, text=description, foreground='gray', font=('Helvetica', 8)).grid(
-            row=row + 1, column=1, columnspan=2, sticky='w', padx=5
-        )
-
-        config_text_entries[config_key] = entry
-        return entry
 
     # ─── EXTRACTION SETTINGS ───
     extraction_frame = ttk.LabelFrame(settings_scrollable_frame, text='🔍 Extraction Settings', padding=10)
@@ -5040,29 +5062,22 @@ def setup_gui():
         settings_scrollable_frame, text='🧭 Semantic Ranking', padding=10
     )
     semantic_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
-    semantic_frame.columnconfigure(1, weight=1)
 
-    create_text_row(
-        semantic_frame, 0, "SEMANTIC_NICHE", "SEMANTIC_NICHE",
-        "← Who you are looking for, written as a sentence rather than as keywords. "
-        "A model reads it the way it reads a bio, so it works better that way: "
-        "\"fotografi che scattano su pellicola e mostrano il loro lavoro\""
-    )
-    create_config_row(semantic_frame, 2, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
+    create_config_row(semantic_frame, 0, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
                       "← 0-100. How much of a candidate's rank is the niche rather "
                       "than how often they were seen. 0 is the order without it")
-    create_config_row(semantic_frame, 3, "SEMANTIC_TOP_K", "SEMANTIC_TOP_K",
+    create_config_row(semantic_frame, 1, "SEMANTIC_TOP_K", "SEMANTIC_TOP_K",
                       "← Candidates kept after a search. Every one of them is read, "
                       "one page load each, so this is what the pass costs")
-    create_config_row(semantic_frame, 4, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
+    create_config_row(semantic_frame, 2, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
                       "← Seconds between profiles while reading. 0 is as fast as the "
                       "pages load")
 
     ttk.Label(
         semantic_frame,
-        text="Switched on and off from the Auto Follow tab, next to the mode.",
+        text="Switched on, and the niche described, on the Auto Follow tab.",
         foreground='gray', font=('Helvetica', 8)
-    ).grid(row=5, column=0, columnspan=3, sticky='w', pady=(8, 0))
+    ).grid(row=3, column=0, columnspan=3, sticky='w', pady=(8, 0))
 
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
@@ -5110,17 +5125,13 @@ def setup_gui():
                 messagebox.showerror("Invalid Value", f"Could not convert '{entry.get()}' to a number for {key}")
                 return
 
-        # Words, not numbers, so these never go near int().
-        for key, entry in config_text_entries.items():
-            CONFIG[key] = entry.get().strip()
-
         save_config(CONFIG)
         log("✅ Configuration saved!", 'success')
         messagebox.showinfo("Saved", "Configuration has been saved. Changes will take effect on next session.")
 
     def reset_config():
         """Reset all config entries to saved config."""
-        for key, entry in list(config_entries.items()) + list(config_text_entries.items()):
+        for key, entry in config_entries.items():
             entry.delete(0, tk.END)
             entry.insert(0, str(CONFIG.get(key, "")))
 
