@@ -524,7 +524,14 @@ function read(link) {
     // The title may be on the link itself, which querySelector would not reach.
     const titled = link.matches('[title]') ? link : link.querySelector('[title]');
     const title = titled ? titled.getAttribute('title') : null;
-    return {title: title, text: link.innerText || link.textContent || ''};
+    // The address takes no part in choosing the count, which goes by what the link
+    // says. It is carried so check_profile.py can show which link a number came
+    // from, the one thing a log line cannot tell you when a count looks wrong.
+    return {
+        href: link.getAttribute('href') || '',
+        title: title,
+        text: link.innerText || link.textContent || '',
+    };
 }
 
 function readAll(selector) {
