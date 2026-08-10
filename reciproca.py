@@ -3040,6 +3040,92 @@ def read_profile_stats():
     )
 
 
+def read_candidate_profile(username):
+    """Open a candidate's profile and read what it says about itself.
+
+    Comes back as the (name, category, bio) that make_affinity_scorer wants. Only
+    the last is filled in: the header is one run of text, and profile_description()
+    takes the part of it that describes the account rather than counting it.
+
+    Never raises, and never guesses. A page that will not load, or that Instagram
+    answers with somebody else's profile, leaves the candidate unscored - which
+    keeps their sighting count and their place, rather than recording a number
+    about a profile that was never read.
+    """
+    nothing = (None, None, None)
+
+    try:
+        driver.get(f"https://www.instagram.com/{username}/")
+        wait_for_element(driver, By.TAG_NAME, "header")
+        time.sleep(random.uniform(1.0, 2.0))  # Let the header settle
+
+        # Instagram answers a visit to some profiles with a page of suggestions.
+        # Reading that would score this candidate on a stranger's bio.
+        if username.lower() not in driver.current_url.lower():
+            logger.info(f"Asked for {username} and landed somewhere else, leaving it unscored")
+            return nothing
+
+        raw = driver.execute_script(PROFILE_STATS_JS)
+    except WebDriverException as e:
+        logger.info(f"Could not read {username}: {type(e).__name__}")
+        return nothing
+    finally:
+        # The pass walks hundreds of profiles in a row, which is the sort of thing
+        # worth doing at the same unhurried pace as everything else here.
+        time.sleep(random.uniform(2.0, 4.0))
+
+    if not raw:
+        return nothing
+    return None, None, profile_description(raw.get('headerText') or "")
+
+
+def run_scoring_pass():
+    """Score the strongest candidates in the queue, then hold the queue to size.
+
+    Runs at the end of a search rather than during a follow session. The browser is
+    already up and already reading heavily here, and a follow session stays exactly
+    as quick as it has always been.
+
+    Every way of not being able to score leaves the queue ordered on sighting counts
+    alone, which is what it was ordered on before any of this existed. None of them
+    is an error.
+    """
+    if not CONFIG["SEMANTIC_ENABLED"]:
+        return
+
+    niche = str(CONFIG.get("SEMANTIC_NICHE") or "").strip()
+    if not niche:
+        log("ℹ️ No niche written in the settings, so nothing is scored", 'info')
+        return
+
+    scorer = make_affinity_scorer(read_candidate_profile, semantic_model.embed, niche)
+    if scorer is None:
+        log("ℹ️ Semantic ranking is off, the queue keeps its order by sightings", 'info')
+        return
+
+    def on_progress(number, total, username):
+        if number == 1 or number % 25 == 0:
+            log(f"🧭 Scoring {number}/{total}...", 'info')
+
+    scored = score_queue(scorer, on_progress=on_progress)
+    if scored:
+        log(f"🧭 Scored {scored} profiles against your niche", 'success')
+
+    dropped = trim_queue()
+    if dropped:
+        log(
+            f"✂️ Queue held at {CONFIG['SEMANTIC_SHORTLIST']}: {dropped} candidates "
+            f"left it. Their sighting counts are kept, so a later search that finds "
+            f"them again picks up where this one left off",
+            'info'
+        )
+
+    try:
+        refresh_queue_display()
+    except Exception as e:
+        logger.debug(f"Could not refresh the queue display: {e}")
+
+
 def profile_bot_reason():
     """Why the profile in the browser looks automated, or None to follow it."""
     # The header can render before the counts arrive, so give them a moment.
@@ -3865,6 +3951,16 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         log(f"📋 Queue now has {total_count} total users", 'info')
         # Refresh queue display
         refresh_queue_display()
+
+    # The search has just left a queue longer than anyone will follow through, and
+    # nearly all of it on one sighting count, which is to say in a tie that count
+    # has no opinion about. Reading the strongest few hundred is what breaks it.
+    if not stop_requested.is_set():
+        try:
+            run_scoring_pass()
+        except Exception as e:
+            log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
+            logger.exception("The scoring pass failed")
 
     return ranked_users
 
@@ -4755,6 +4851,7 @@ def setup_gui():
 
     # Dictionary to hold config entry widgets
     config_entries = {}
+    config_text_entries = {}
 
     def create_config_row(parent, row, label, config_key, description, is_password=False, validate=True):
         """Helper to create a labeled config row with entry field."""
@@ -4774,6 +4871,28 @@ def setup_gui():
         desc_lbl.grid(row=row, column=2, sticky='w', pady=3)
 
         config_entries[config_key] = entry
+        return entry
+
+    def create_text_row(parent, row, label, config_key, description):
+        """A setting that is words rather than a number, so it gets room to be read.
+
+        Kept apart from the numbered rows because saving them converts every entry
+        to an integer, and a sentence put through that would take the whole save
+        down with it.
+        """
+        ttk.Label(parent, text=f'{label}:', font=('Helvetica', 9, 'bold')).grid(
+            row=row, column=0, sticky='w', pady=3, padx=(0, 5)
+        )
+
+        entry = ttk.Entry(parent, width=60)
+        entry.insert(0, str(CONFIG.get(config_key, "")))
+        entry.grid(row=row, column=1, columnspan=2, sticky='we', pady=3, padx=5)
+
+        ttk.Label(parent, text=description, foreground='gray', font=('Helvetica', 8)).grid(
+            row=row + 1, column=1, columnspan=2, sticky='w', padx=5
+        )
+
+        config_text_entries[config_key] = entry
         return entry
 
     # ─── EXTRACTION SETTINGS ───
@@ -4825,6 +4944,28 @@ def setup_gui():
     create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
                       "← Reject when following exceeds followers by this many times")
 
+    # ─── SEMANTIC RANKING ───
+    semantic_frame = ttk.LabelFrame(
+        settings_scrollable_frame, text='🧭 Semantic Ranking', padding=10
+    )
+    semantic_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+    semantic_frame.columnconfigure(1, weight=1)
+
+    create_text_row(
+        semantic_frame, 0, "SEMANTIC_NICHE", "SEMANTIC_NICHE",
+        "← Who you are looking for, written as a sentence rather than as keywords. "
+        "A model reads it the way it reads a bio, so it works better that way: "
+        "\"fotografi che scattano su pellicola e mostrano il loro lavoro\""
+    )
+    create_config_row(semantic_frame, 2, "SEMANTIC_ENABLED", "SEMANTIC_ENABLED",
+                      "← 1 to read the top of the queue after a search, 0 to skip it")
+    create_config_row(semantic_frame, 3, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
+                      "← 0-100. How much of a candidate's rank is the niche rather "
+                      "than how often they were seen. 0 is the old order")
+    create_config_row(semantic_frame, 4, "SEMANTIC_SHORTLIST", "SEMANTIC_SHORTLIST",
+                      "← How many of the best candidates get read, and how long the "
+                      "queue is kept. One page load each")
+
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
 
@@ -4871,13 +5012,17 @@ def setup_gui():
                 messagebox.showerror("Invalid Value", f"Could not convert '{entry.get()}' to a number for {key}")
                 return
 
+        # Words, not numbers, so these never go near int().
+        for key, entry in config_text_entries.items():
+            CONFIG[key] = entry.get().strip()
+
         save_config(CONFIG)
         log("✅ Configuration saved!", 'success')
         messagebox.showinfo("Saved", "Configuration has been saved. Changes will take effect on next session.")
 
     def reset_config():
         """Reset all config entries to saved config."""
-        for key, entry in config_entries.items():
+        for key, entry in list(config_entries.items()) + list(config_text_entries.items()):
             entry.delete(0, tk.END)
             entry.insert(0, str(CONFIG.get(key, "")))
 

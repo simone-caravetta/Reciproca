@@ -6,6 +6,7 @@ model, and this file is meant to run on the standard library alone.
 
     python3 tests/test_affinity.py
 """
+import os
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
@@ -280,6 +281,33 @@ class ModelAbsentTest(unittest.TestCase):
         self.assertIsNone(
             R.make_affinity_scorer(lambda u: (None, None, "bio"), self.model.embed, "nicchia")
         )
+
+
+class NicheSettingTest(unittest.TestCase):
+    """The niche is a sentence, and every other setting is a number.
+
+    Saving converts each entry with int(), so the sentence is kept in a separate
+    registry and written straight through. This checks the file end of that: a
+    setting that is words has to survive being saved and read back.
+    """
+
+    def setUp(self):
+        import tempfile
+        R.CONFIG_FILE = os.path.join(tempfile.mkdtemp(), "bot_config.json")
+
+    def test_a_sentence_survives_a_save_and_a_load(self):
+        niche = "fotografi che scattano su pellicola e mostrano il loro lavoro"
+        R.save_config({**R.CONFIG, "SEMANTIC_NICHE": niche})
+        self.assertEqual(R.load_config()["SEMANTIC_NICHE"], niche)
+
+    def test_the_settings_have_defaults_before_anything_is_saved(self):
+        """A config file written by an older version has none of these keys in it,
+        and the merge with the defaults is what keeps that from being a crash."""
+        R.save_config({"BOT_MIN_POSTS": 3})
+        loaded = R.load_config()
+        for key in ("SEMANTIC_NICHE", "SEMANTIC_ENABLED", "SEMANTIC_WEIGHT", "SEMANTIC_SHORTLIST"):
+            self.assertIn(key, loaded, key)
+        self.assertEqual(loaded["BOT_MIN_POSTS"], 3, "what was saved is still there")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
