@@ -69,7 +69,8 @@ def report(username):
             value = R.count_link_value(entry, markers)
             text = (entry.get("text") or "").replace("\n", " ")
             verdict = f"the count, {value}" if value is not None else "not the count"
-            print(f"  {text!r} title={entry.get('title')!r} -> {verdict}")
+            print(f"  href={entry.get('href')!r}")
+            print(f"    {text!r} title={entry.get('title')!r} -> {verdict}")
         if not raw.get(name):
             print("  none")
         print(f"  the header text says: {R.parse_labelled_count(header_text, markers)}")
