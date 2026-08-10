@@ -236,6 +236,25 @@ class RankFormulaTest(unittest.TestCase):
         self.assertGreater(at(50, seen_often), at(50, seen_once))
         self.assertLess(at(60, seen_often), at(60, seen_once))
 
+    def test_any_weight_at_all_orders_a_tie(self):
+        """Most candidates are seen once, so most of the queue is on one count. The
+        affinity is the only thing telling those apart, and it does not take much
+        weight to let it: what the weight really sets is how far an affinity can
+        carry somebody past a candidate seen more often."""
+        for weight in (1, 5, 30, 100):
+            better = R.combined_rank(1, 0.60, weight)
+            worse = R.combined_rank(1, 0.30, weight)
+            self.assertGreater(better, worse, weight)
+
+    def test_a_small_weight_leaves_a_real_gap_in_sightings_alone(self):
+        """Ordering the tie must not come at the price of overturning the count."""
+        self.assertGreater(
+            R.combined_rank(6, 0.30, weight=30), R.combined_rank(1, 0.60, weight=30)
+        )
+
+    def test_the_shipped_default_is_one_that_orders_ties(self):
+        self.assertGreater(R.CONFIG["SEMANTIC_WEIGHT"], 0)
+
     def test_an_unscored_candidate_keeps_their_count(self):
         """Not zero: the queue holds people from before scoring existed, and a pass
         can be stopped half way. Scoring them zero would bury them under anyone who

@@ -72,7 +72,7 @@ CONFIG = {
     # Semantic ranking - how close a candidate's profile reads to the niche you
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
-    "SEMANTIC_WEIGHT": 0,                   # 0-100. At 0 the queue keeps today's order
+    "SEMANTIC_WEIGHT": 30,                  # 0-100. See combined_rank() for what it buys
     "SEMANTIC_SHORTLIST": 200,              # How many top candidates get scored
     "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
@@ -583,7 +583,7 @@ def load_config():
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
         "SEMANTIC_ENABLED": 1,
-        "SEMANTIC_WEIGHT": 0,
+        "SEMANTIC_WEIGHT": 30,
         "SEMANTIC_SHORTLIST": 200,
         "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
@@ -737,6 +737,17 @@ def combined_rank(frequency, affinity, weight):
     At 0 it is the sighting count and nothing else, so scoring can be switched on
     and watched for a while without it moving anybody. At 100 the count stops
     counting.
+
+    Most of the queue sits on the same count, since most candidates are seen once,
+    and any weight above zero is enough to order all of those: the affinity is the
+    only thing telling them apart. What the weight really sets is how far up an
+    affinity can carry somebody past a candidate seen more often. It takes about 60
+    for a profile reading 0.65 to overtake one seen six times reading 0.30.
+
+    So the default is not 0. The order within a tie is drawn from the username
+    today, which is to say it is arbitrary, and replacing an arbitrary order with a
+    measured one risks nothing: where the measurement is poor, it is arbitrary
+    again, which is where it started.
 
     A candidate with no affinity keeps the sighting count as their whole score.
     Not zero: the queue holds people from before any of this existed, and a scoring
