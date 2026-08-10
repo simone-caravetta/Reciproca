@@ -1867,6 +1867,89 @@ def stop_bot():
         logger.debug(f"Error during stop cleanup: {e}")
 
 # ---------------------------
+# SEMANTIC AFFINITY
+# ---------------------------
+# How close a candidate's profile reads to the niche described in the settings.
+# Everything here is arithmetic and text handling: turning either one into a vector
+# is a separate job, handed in, so the model can be absent without any of this
+# having an opinion about it.
+
+def cosine(left, right):
+    """How close two vectors point, from -1 to 1, or None if either says nothing.
+
+    Written out rather than pulled from a library: it is five lines, and a package
+    added here is a package to be found again by the Windows build.
+    """
+    if not left or not right or len(left) != len(right):
+        return None
+
+    dot = sum(a * b for a, b in zip(left, right))
+    size = (sum(a * a for a in left) ** 0.5) * (sum(b * b for b in right) ** 0.5)
+    return dot / size if size else None
+
+
+def affinity_between(profile_vector, niche_vector):
+    """The two vectors as an affinity from 0 to 1, or None if there is not one.
+
+    Opposite directions are floored at 0 rather than kept negative. Below zero the
+    number stops meaning "less like the niche" and starts meaning something about
+    the model's own geometry, which is not a thing to rank people by, and the whole
+    scale is meant to read as "none of it" to "all of it".
+    """
+    closeness = cosine(profile_vector, niche_vector)
+    return None if closeness is None else max(0.0, min(1.0, closeness))
+
+
+def profile_text(name=None, category=None, bio=None):
+    """The parts of a profile worth comparing, as one piece of text, or None.
+
+    The category is Instagram's own label, filled in from a fixed list rather than
+    written by hand, so it says what somebody does in the same words every time.
+    The bio says it in theirs. The display name is often a real name and says
+    nothing, but it is where some people put what they do, so it goes in last.
+
+    None where there is nothing to read. A profile with an empty bio is common and
+    perfectly good, and it must come back unscored rather than scored badly: it is
+    a profile nobody can judge, not a bad one.
+    """
+    parts = [str(part).strip() for part in (category, bio, name) if part]
+    joined = ". ".join(part for part in parts if part)
+    return joined or None
+
+
+def make_affinity_scorer(read_profile, embed, niche):
+    """A function from username to affinity, for score_queue().
+
+    `read_profile` returns whatever the browser can see of a profile as a
+    (name, category, bio) triple; `embed` turns a piece of text into a vector.
+    Both are handed in: one needs a browser and the other needs a model, and
+    neither belongs in the arithmetic.
+
+    The niche is embedded once here rather than per candidate. It does not change
+    while a pass runs, and it is the same cost as a profile every time.
+
+    Returns None if there is nothing to compare against, so a pass with no niche
+    written, or no model to be had, scores nobody rather than scoring everybody
+    zero.
+    """
+    if not (niche or "").strip():
+        return None
+
+    niche_vector = embed(niche.strip())
+    if not niche_vector:
+        return None
+
+    def score(username):
+        name, category, bio = read_profile(username)
+        text = profile_text(name=name, category=category, bio=bio)
+        if text is None:
+            return None
+        return affinity_between(embed(text), niche_vector)
+
+    return score
+
+
+# ---------------------------
 # SCRAPING FUNCTIONS
 # ---------------------------
 @retry()
