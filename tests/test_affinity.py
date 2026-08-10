@@ -133,5 +133,72 @@ class AffinityScorerTest(unittest.TestCase):
         self.assertEqual(embedded.count("pellicola"), 1)
 
 
+
+class MeanPoolingTest(unittest.TestCase):
+    """The model gives a vector per token; what is wanted is one for the text."""
+
+    def test_it_averages_the_tokens(self):
+        rows = [[2.0, 0.0], [0.0, 4.0]]
+        self.assertEqual(R.mean_pooled(rows, [1, 1]), [1.0, 2.0])
+
+    def test_padding_is_left_out(self):
+        """A batch is padded to a fixed length. Averaging the padding in would drag
+        every short bio towards the same place, and hardest where there is least
+        written - the shorter the text, the more padding there is."""
+        rows = [[2.0, 0.0], [0.0, 4.0], [100.0, 100.0]]
+        self.assertEqual(R.mean_pooled(rows, [1, 1, 0]), [1.0, 2.0])
+
+    def test_a_text_that_is_all_padding(self):
+        self.assertIsNone(R.mean_pooled([[1.0, 2.0]], [0]))
+
+    def test_nothing_at_all(self):
+        self.assertIsNone(R.mean_pooled([], [1]))
+        self.assertIsNone(R.mean_pooled(None, None))
+
+
+class NormalizeTest(unittest.TestCase):
+    def test_it_comes_out_at_length_one(self):
+        vector = R.normalized([3.0, 4.0])
+        self.assertAlmostEqual(sum(v * v for v in vector) ** 0.5, 1.0)
+        self.assertAlmostEqual(vector[0], 0.6)
+
+    def test_direction_is_kept(self):
+        """Which is the whole point: length is what is being thrown away."""
+        self.assertAlmostEqual(R.cosine(R.normalized([3.0, 4.0]), [3.0, 4.0]), 1.0)
+
+    def test_a_vector_with_no_length(self):
+        self.assertIsNone(R.normalized([0.0, 0.0]))
+        self.assertIsNone(R.normalized([]))
+        self.assertIsNone(R.normalized(None))
+
+
+class ModelAbsentTest(unittest.TestCase):
+    """Absent is a normal state. The packages are not installed here, which is the
+    same position a user is in before the first download, so this is the real
+    behaviour rather than a simulation of it."""
+
+    def setUp(self):
+        _stubs.install_fake_ui(R)
+        self.model = R.SemanticModel()
+
+    def test_it_says_it_is_not_available(self):
+        self.assertFalse(self.model.available())
+
+    def test_embedding_comes_back_empty_rather_than_raising(self):
+        self.assertIsNone(self.model.embed("fotografia analogica"))
+
+    def test_it_gives_up_once_and_does_not_retry_every_candidate(self):
+        """A pass over 200 profiles must not try to import a missing package 200
+        times, nor log the same line 200 times."""
+        self.model.available()
+        self.assertTrue(self.model.failed)
+
+    def test_the_scorer_is_not_built_at_all_without_a_model(self):
+        """So a pass with no model scores nobody, rather than scoring everybody the
+        same and reordering the queue by nothing."""
+        self.assertIsNone(
+            R.make_affinity_scorer(lambda u: (None, None, "bio"), self.model.embed, "nicchia")
+        )
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
