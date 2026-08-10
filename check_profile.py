@@ -75,6 +75,14 @@ def report(username):
             print("  none")
         print(f"  the header text says: {R.parse_labelled_count(header_text, markers)}")
 
+    described = R.profile_description(header_text)
+    print("\nWhat this profile says about itself, as the ranking reads it:")
+    if described is None:
+        print("  nothing readable, so this profile would go unscored")
+    else:
+        for line in described.splitlines():
+            print(f"  {line}")
+
     posts, followers, following = R.read_profile_stats()
     print(
         f"\nWhat the bot filter is given: "

@@ -53,6 +53,87 @@ class AffinityBetweenTest(unittest.TestCase):
         self.assertIsNone(R.affinity_between([], [1, 0]))
 
 
+class ProfileDescriptionTest(unittest.TestCase):
+    """What a profile says about itself, taken out of the header's run of text.
+
+    REAL is the header of a real profile, printed by check_profile.py, which is
+    what settled where the bio sits: after the last count, before the buttons, with
+    the names of the highlight covers trailing along behind them.
+    """
+
+    REAL = "\n".join([
+        "iinkandlight",
+        "Elif Aslan",
+        "60 post",
+        "975 follower",
+        "929 seguiti",
+        "Fotografo",
+        "canon eos rp 7",
+        "\u3147\u3145\u3147",
+        "film \u2022 photo \u2022 drawing",
+        "Account seguito da shotsby.eagles, ellajam.media + altri 34",
+        "Segui",
+        "Messaggio",
+        "\U0001f338\U0001f469",
+        "M O V \u0130 E",
+        "my drawings",
+        "kamera arkas\u0131",
+    ])
+
+    def test_the_real_profile(self):
+        described = R.profile_description(self.REAL)
+        self.assertEqual(
+            described,
+            "Fotografo\ncanon eos rp 7\n\u3147\u3145\u3147\nfilm \u2022 photo \u2022 drawing",
+        )
+
+    def test_the_username_and_the_counts_are_left_out(self):
+        described = R.profile_description(self.REAL)
+        for unwanted in ("iinkandlight", "60 post", "975 follower", "929 seguiti"):
+            self.assertNotIn(unwanted, described)
+
+    def test_the_people_in_common_are_left_out(self):
+        """Other people's names say nothing about this profile, and the line carries
+        a number that would read as part of the bio."""
+        self.assertNotIn("shotsby.eagles", R.profile_description(self.REAL))
+
+    def test_the_highlight_covers_are_left_out(self):
+        """They sit past the buttons: a list of holiday names would drown the bio."""
+        for cover in ("M O V", "my drawings", "kamera"):
+            self.assertNotIn(cover, R.profile_description(self.REAL))
+
+    def test_a_profile_with_no_people_in_common(self):
+        header = "someone\n12 posts\n300 followers\n250 following\nPhotographer\nfilm only\nFollow\nMessage"
+        self.assertEqual(R.profile_description(header), "Photographer\nfilm only")
+
+    def test_a_profile_you_already_follow(self):
+        """The buttons read differently, and the bio still has to end at them."""
+        header = "someone\n12 posts\n300 followers\n250 following\nfilm only\nFollowing\nMessage"
+        self.assertEqual(R.profile_description(header), "film only")
+
+    def test_a_bio_that_says_follow_me(self):
+        """Whole lines are matched against the buttons, not searched for inside
+        them, or this bio would stop at its first word."""
+        header = "someone\n12 posts\n300 followers\n250 following\nseguimi su youtube\nvideo ogni giorno\nSegui"
+        self.assertEqual(
+            R.profile_description(header), "seguimi su youtube\nvideo ogni giorno"
+        )
+
+    def test_the_counts_on_a_single_line(self):
+        header = "someone\n12 posts 300 followers 250 following\nPhotographer\nFollow"
+        self.assertEqual(R.profile_description(header), "Photographer")
+
+    def test_a_profile_with_nothing_written_on_it(self):
+        header = "someone\n12 posts\n300 followers\n250 following\nFollow\nMessage"
+        self.assertIsNone(R.profile_description(header))
+
+    def test_a_header_this_code_does_not_understand(self):
+        """No counts in it means it is not the header this expects. That is a thing
+        to say nothing about, not a thing to guess at."""
+        for header in ("", None, "just some words\nand some more"):
+            self.assertIsNone(R.profile_description(header), repr(header))
+
+
 class ProfileTextTest(unittest.TestCase):
     def test_everything_readable_goes_in(self):
         text = R.profile_text(name="Elif Aslan", category="Fotografo", bio="canon eos rp")

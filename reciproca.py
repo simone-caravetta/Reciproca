@@ -181,6 +181,19 @@ FOLLOWING_LABEL_MARKERS = (
 # case-sensitive, so these keep their original capitalization.
 CLOSE_BUTTON_LABELS = ("Close", "Chiudi")
 
+# The line naming the people who follow an account and who you follow too. It sits
+# in the header right after the bio, so it is one of the two things that mark where
+# the bio ends.
+MUTUAL_FOLLOWERS_MARKERS = (
+    "followed by",          # EN
+    "account seguito da",   # IT
+)
+
+# The buttons under a profile's bio. Whole lines are matched against these rather
+# than searched for inside them: "segui" appears in plenty of real bios, and a bio
+# reading "seguimi su youtube" must not be cut off at its first word.
+PROFILE_BUTTON_LABELS = FOLLOW_BUTTON_MARKERS + FOLLOWED_SIGNAL_MARKERS
+
 # Page or dialog text Instagram shows when it is throttling or blocking actions,
 # paired with the explanation surfaced in the log.
 RATE_LIMIT_MARKERS = (
@@ -1946,6 +1959,44 @@ def affinity_between(profile_vector, niche_vector):
     """
     closeness = cosine(profile_vector, niche_vector)
     return None if closeness is None else max(0.0, min(1.0, closeness))
+
+
+def profile_description(header_text):
+    """What a profile says about itself, out of the header's text, or None.
+
+    The header is one run of text with everything in it. Read from a real profile,
+    in order: the username, the display name, the three counts, the category, the
+    bio, the line about people in common, the buttons, and then the names of the
+    highlight covers. So what is wanted is the stretch between the last count and
+    the buttons, which is the category and the bio together.
+
+    They are not told apart, and there is nothing lost by that: Instagram's category
+    and the bio both say what somebody does, and both are going into the same
+    comparison.
+
+    A header with no counts in it is not a header this code understands, and comes
+    back as None rather than as a guess. Same for a profile with nothing written
+    between the counts and the buttons, which is a profile nobody can judge rather
+    than a bad one.
+    """
+    lines = [line.strip() for line in (header_text or "").splitlines() if line.strip()]
+
+    start = None
+    for index, line in enumerate(lines):
+        if parse_labelled_count(line, FOLLOWING_LABEL_MARKERS) is not None:
+            start = index + 1
+            break
+    if start is None:
+        return None
+
+    described = []
+    for line in lines[start:]:
+        lowered = line.lower()
+        if lowered in PROFILE_BUTTON_LABELS or has_marker(lowered, MUTUAL_FOLLOWERS_MARKERS):
+            break
+        described.append(line)
+
+    return "\n".join(described) or None
 
 
 def profile_text(name=None, category=None, bio=None):
