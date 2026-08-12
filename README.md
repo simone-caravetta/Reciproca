@@ -43,6 +43,9 @@ python reciproca.py
 Google Chrome must be installed; `webdriver-manager` downloads the matching
 ChromeDriver on first run.
 
+Reciproca downloads a little Embedding Model at runtime the first time you
+execute the Semantic Evaluation.
+
 ## Follow
 
 1. **Auto Follow** → **Open Browser**, then log into Instagram by hand.
