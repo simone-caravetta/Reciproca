@@ -73,9 +73,30 @@ with the Instagram account it was recorded against: export again and load the ne
 files to carry on. **Reset** discards it on purpose, and says what it will delete
 first.
 
+##Semantic Ranking
+* Rank a candidate on one number
+
+Groundwork for scoring a candidate's profile against the niche you describe. This
+is the arithmetic only: nothing scores anything yet.
+
+Two things have to be mixed that are not on the same scale. A sighting count is an
+integer that grows without limit across searches; an affinity is already between 0
+and 1. So the count is squashed by f / (f + 2):
+
+    seen 1 -> 0.33    seen 3 -> 0.60    seen 10 -> 0.83
+    seen 2 -> 0.50    seen 6 -> 0.75    seen 20 -> 0.91
+
+The two are then weighed:
+
+    rank = (1 - weight/100) * count_score + (weight/100) * affinity
+
+Affinity is given by comparing your prompt of a desired kind of user and the profile
+description found in user page on instagram. The comparison is given by a little 
+embedding multi language mode that runs on your ram and cpu (150-200mb). 
+
 ## Coming soon
 
-- Semantic ranking of candidates during Deep Search, powered by AI
+- DONE Semantic ranking of candidates during Deep Search, powered by AI
 - More Instagram interface languages (see below)
 
 ## Instagram language support
