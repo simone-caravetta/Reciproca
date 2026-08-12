@@ -19,6 +19,12 @@ unfollow_last_session.json
 follow_bot.log
 follow_logs_*.txt
 
+# The sentence model for the semantic ranking, fetched on first use and written
+# next to the app like everything else it generates. Over a hundred megabytes, and
+# nothing here authored it: see MODEL_REPO in reciproca.py for where it comes from.
+# Deleting this folder is how you make it download again.
+model/
+
 # Instagram data exports the user supplies locally
 followers.json
 following.json

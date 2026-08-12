@@ -4,6 +4,7 @@ Unified GUI tool: queue-based/hashtag follow, unfollow of non-followers
 (from an Instagram data export), rate limit detection, and persistent state.
 """
 
+import hashlib
 import json
 import logging
 import functools
@@ -67,6 +68,14 @@ CONFIG = {
     "BOT_MIN_FOLLOWERS": 10,
     "BOT_MAX_FOLLOWING": 3000,
     "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
+
+    # Semantic ranking - how close a candidate's profile reads to the niche you
+    # describe, scored after a search on the strongest candidates it found.
+    "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
+    "SEMANTIC_WEIGHT": 60,                  # 0-100. See combined_rank() for what it buys
+    "SEMANTIC_TOP_K": 200,                  # Candidates kept after a search, and read
+    "SEMANTIC_READ_DELAY": 1,               # Seconds between profiles, 0 for none
+    "SEMANTIC_NICHE": "",                   # What you are looking for, in your words
 
     # Unfollow delays - same conservative philosophy as follow
     "UNFOLLOW_DELAY_MIN": 15,               # Minimum seconds between unfollows
@@ -172,6 +181,19 @@ FOLLOWING_LABEL_MARKERS = (
 # Labels on a post dialog's close button. Matched via XPath contains(), which is
 # case-sensitive, so these keep their original capitalization.
 CLOSE_BUTTON_LABELS = ("Close", "Chiudi")
+
+# The line naming the people who follow an account and who you follow too. It sits
+# in the header right after the bio, so it is one of the two things that mark where
+# the bio ends.
+MUTUAL_FOLLOWERS_MARKERS = (
+    "followed by",          # EN
+    "account seguito da",   # IT
+)
+
+# The buttons under a profile's bio. Whole lines are matched against these rather
+# than searched for inside them: "segui" appears in plenty of real bios, and a bio
+# reading "seguimi su youtube" must not be cut off at its first word.
+PROFILE_BUTTON_LABELS = FOLLOW_BUTTON_MARKERS + FOLLOWED_SIGNAL_MARKERS
 
 # Page or dialog text Instagram shows when it is throttling or blocking actions,
 # paired with the explanation surfaced in the log.
@@ -574,6 +596,11 @@ def load_config():
         "BOT_MIN_FOLLOWERS": 10,
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
+        "SEMANTIC_ENABLED": 1,
+        "SEMANTIC_WEIGHT": 60,
+        "SEMANTIC_TOP_K": 200,
+        "SEMANTIC_READ_DELAY": 1,
+        "SEMANTIC_NICHE": "",
         "UNFOLLOW_DELAY_MIN": 15,
         "UNFOLLOW_DELAY_MAX": 30,
         "UNFOLLOW_DAILY_LIMIT": 20,
@@ -684,10 +711,108 @@ def ranking_frequencies():
     return last_scrape_frequencies
 
 
+# Where the halfway point of the sighting scale falls: a candidate seen this many
+# times scores 0.5. Two says that being seen twice rather than once is the step that
+# matters, and that the difference between twenty and twenty-one is not.
+FREQUENCY_HALFWAY = 2
+
+
+def frequency_score(frequency):
+    """A sighting count as a number between 0 and 1, as f / (f + FREQUENCY_HALFWAY).
+
+    Three things this shape has to do. It has to keep the order the count already
+    gave, so that weighing affinity at zero leaves the queue exactly as it is today.
+    It has to fit between 0 and 1, so it can be mixed with an affinity at all. And
+    the steps have to shrink: 1 to 2 is worth a lot, 20 to 21 is worth nothing, which
+    is how the count behaves in fact.
+
+    Fixed rather than measured against the batch it arrived in. Scaling a candidate
+    against the 200 around it would give the same person a different number in the
+    next search, and the queue outlives any one search.
+    """
+    frequency = max(0, frequency or 0)
+    return frequency / (frequency + FREQUENCY_HALFWAY)
+
+
+def queue_affinity(item):
+    """How close this candidate's profile read to the niche, or None if unscored."""
+    if isinstance(item, dict):
+        value = item.get('affinity')
+        return value if isinstance(value, (int, float)) else None
+    return None
+
+
+def combined_rank(frequency, affinity, weight):
+    """The one number a candidate is ordered by, between 0 and 1.
+
+    `weight` is how much of it the affinity is worth, 0 to 100:
+
+        rank = (1 - weight/100) * frequency_score + (weight/100) * affinity
+
+    At 0 it is the sighting count and nothing else, so scoring can be switched on
+    and watched for a while without it moving anybody. At 100 the count stops
+    counting.
+
+    Most of the queue sits on the same count, since most candidates are seen once,
+    and any weight above zero is enough to order all of those: the affinity is the
+    only thing telling them apart. What the weight really sets is something else -
+    how far up an affinity can carry somebody past a candidate seen more often.
+
+    That is where the number is decided, and it is not where it looks. The affinity
+    gap needed to climb one step of the count:
+
+                            at 30      at 60
+        seen 2 over 1        0.39       0.11
+        seen 3 over 1        0.62       0.18
+        seen 6 over 1        0.97       0.28
+
+    Real affinities sit within a few hundredths of each other, not within four
+    tenths, so at 30 the steps are effectively sealed: the affinity would sort
+    inside each of them and never move anybody between them, which is most of what
+    it was brought in to do. At 60 the two genuinely mix, and it still takes a real
+    gap rather than noise.
+
+    So 60 is the default: a little more to the affinity than to the count, rather
+    than a takeover. If the scores come back all within a hundredth of each other,
+    that is the model failing to tell people apart, and the answer is a better
+    description of the niche before it is a smaller weight.
+
+    A candidate with no affinity keeps the sighting count as their whole score.
+    Not zero: the queue holds people from before any of this existed, and a scoring
+    pass can be stopped half way, and scoring them zero would bury them under
+    anyone who happened to be measured. An unknown is not a bad result, which is
+    the rule the bot filter already goes by.
+    """
+    counted = frequency_score(frequency)
+    if affinity is None:
+        return counted
+
+    share = min(max(weight or 0, 0), 100) / 100
+    return (1 - share) * counted + share * affinity
+
+
+def tie_breaker(username):
+    """A stable, name-independent order for candidates on the same score.
+
+    Most candidates are seen exactly once, so most of the queue is tied, and ties
+    used to break on the username. That sorted the same names to the top of every
+    batch, which does not matter while the order is only shown - and matters a lot
+    once the top of the queue is the part that gets scored, since the sample would
+    have been an alphabetical slice rather than a fair draw from the tie.
+
+    Drawn from the name rather than stored, so it is the same on every run and
+    entries written by older versions have one too. Not drawn afresh per sort: the
+    list would reshuffle under the cursor every time the window redrew.
+    """
+    return hashlib.sha1((username or "").encode('utf-8')).hexdigest()
+
+
 def rank_queue(queue, frequencies=None):
     """Queue entries ordered by rank, highest first.
 
-    Returns a list of (username, rank, item) triples.
+    Returns a list of (username, rank, item) triples, where rank is the one number
+    a candidate is judged on: their sighting count and, once they have been scored,
+    how close their profile read to the niche. See combined_rank().
 
     This is the single definition of the queue's order. The listbox draws it and
     follow_from_queue consumes it, so the account followed next is always the
@@ -695,18 +820,24 @@ def rank_queue(queue, frequencies=None):
     sorted by rank while the follow loop walked the file in insertion order -
     which made the ranking decorative: it was shown but never acted on.
 
-    Ties break on username so the order stays stable between redraws.
+    Ties break on a number drawn from the username rather than on the username
+    itself, so the order is stable between redraws without being alphabetical.
     """
     if frequencies is None:
         frequencies = ranking_frequencies()
+
+    weight = CONFIG["SEMANTIC_WEIGHT"]
 
     ranked = []
     for item in queue:
         username = queue_username(item)
         if username:
-            ranked.append((username, frequencies.get(username, 0), item))
+            rank = combined_rank(
+                frequencies.get(username, 0), queue_affinity(item), weight
+            )
+            ranked.append((username, rank, item))
 
-    ranked.sort(key=lambda entry: (-entry[1], entry[0]))
+    ranked.sort(key=lambda entry: (-entry[1], tie_breaker(entry[0])))
     return ranked
 
 
@@ -785,6 +916,133 @@ def validate_queue():
         logger.info(f"Queue validated: Removed {len(queue) - len(validated_queue)} entries ({removed_count} already followed, {len(queue) - len(unique_queue)} duplicates)")
 
     return len(queue) - len(validated_queue), len(validated_queue)
+
+
+# ---------------------------
+# SCORING PASS
+# ---------------------------
+# What a search leaves behind is a queue far longer than anyone will ever follow
+# through: thousands of candidates, most of them seen exactly once, which is to say
+# most of them in a tie the sighting count has no opinion about. Reading a profile
+# is what breaks that tie, and reading a profile costs a page load, so the pass runs
+# over the strongest few hundred rather than over everything.
+
+def scoring_shortlist(queue, limit, frequencies=None):
+    """The candidates a scoring pass should visit, best first.
+
+    The top `limit` by rank, less anyone already carrying an affinity. A score is
+    kept with the candidate, so a second pass over the same queue pays only for
+    whoever has arrived since the first.
+
+    Candidates below the cut are not scored and not judged: they keep their place
+    and their count, and a later search that pushes them up gets them scored then.
+    """
+    ranked = rank_queue(queue, frequencies)[:max(0, limit)]
+    return [(username, item) for username, _, item in ranked if queue_affinity(item) is None]
+
+
+def with_affinity(item, username, affinity):
+    """The queue entry, carrying its affinity.
+
+    Entries written by older versions are plain usernames with nowhere to put a
+    score, so those become dicts here rather than being skipped.
+    """
+    entry = dict(item) if isinstance(item, dict) else {'username': username}
+    entry['affinity'] = affinity
+    return entry
+
+
+def score_queue(scorer, limit=None, frequencies=None, on_progress=None, stop_event=None):
+    """Give an affinity to the best unscored candidates. Returns how many got one.
+
+    `scorer` takes a username and returns a number between 0 and 1, or None where
+    the profile could not be read. None leaves the candidate unscored rather than
+    scoring them zero: an unknown is not a bad result, and scoring it as one would
+    bury somebody for a page that failed to load.
+
+    The queue is written after every candidate, so stopping the pass keeps what it
+    has already done and the next one starts from there. Stopping is not a way of
+    discarding anybody either: whoever is left unscored stays in the queue, ranked
+    on their count as before.
+    """
+    if limit is None:
+        limit = CONFIG["SEMANTIC_TOP_K"]
+    if stop_event is None:
+        stop_event = scoring_stop
+
+    queue = load_queue()
+    shortlist = scoring_shortlist(queue, limit, frequencies)
+    if not shortlist:
+        return 0
+
+    log(f"🧭 Reading {len(shortlist)} profiles to score them against your niche", 'info')
+
+    positions = {}
+    for index, item in enumerate(queue):
+        username = queue_username(item)
+        if username is not None and username not in positions:
+            positions[username] = index
+
+    scored = 0
+    for number, (username, item) in enumerate(shortlist, 1):
+        if stop_event.is_set():
+            log(f"⏹️ Scoring stopped after {scored} of {len(shortlist)}", 'warning')
+            break
+
+        if on_progress:
+            on_progress(number, len(shortlist), username)
+
+        try:
+            affinity = scorer(username)
+        except Exception as e:
+            log(f"❌ Could not score {username}: {brief_error(e)}", 'error')
+            logger.debug(f"Scoring error on {username}", exc_info=True)
+            continue
+
+        if affinity is None:
+            logger.info(f"No affinity for {username}: nothing readable on the profile")
+            continue
+
+        index = positions.get(username)
+        if index is None:
+            continue
+
+        queue[index] = with_affinity(item, username, affinity)
+        save_queue(queue)
+        scored += 1
+        logger.info(f"Affinity for {username}: {affinity:.2f}")
+
+    return scored
+
+
+def trim_queue(limit=None, frequencies=None):
+    """Keep the best `limit` candidates, drop the rest. Returns how many were let go.
+
+    The sighting counts are deliberately left alone. A candidate dropped here is out
+    of the queue, not out of the record: the count that got them there stays on
+    file, so a later search that runs into them again finds them where they were
+    rather than back at the beginning, and they may well come back above the cut.
+
+    Without this the queue only grows. A search adds thousands and a session
+    follows a few dozen, so the far end of the list is candidates nobody will reach
+    this year, slowing every redraw and every ranking on the way past.
+
+    How long the queue is kept is a different question from how many profiles are
+    worth reading, and they used to share one setting. That made reading fewer of
+    them a way of throwing candidates away, which is not a trade anybody asked for
+    and not one that announces itself.
+    """
+    if limit is None:
+        limit = CONFIG["SEMANTIC_TOP_K"]
+
+    queue = load_queue()
+    ranked = rank_queue(queue, frequencies)
+    if len(ranked) <= limit:
+        return 0
+
+    save_queue([item for _, _, item in ranked[:limit]])
+    return len(ranked) - limit
+
 
 def log_followed_user(username, status="success"):
     """Log a followed user to history."""
@@ -1209,6 +1467,14 @@ browser_opening = threading.Event()
 # Selenium session and the same window, so only one may run at a time.
 session_running = threading.Event()
 stop_requested = threading.Event()
+
+# Stopping the search does not mean skipping the scoring that follows it, so the
+# scoring watches a flag of its own. Stop sets both; the scoring pass clears its own
+# as it starts, which is what lets it run on a search that was cut short. A second
+# press then stops the scoring too, and stop_requested is never cleared behind the
+# user's back - so a search stopped by hand stays stopped, and so does the following
+# that would otherwise have come after it.
+scoring_stop = threading.Event()
 active_threads = []
 # Live extraction tracking
 live_extracted_users = []  # Track users as they're extracted
@@ -1609,6 +1875,7 @@ def watch_browser():
 def stop_bot():
     """Request graceful stop."""
     stop_requested.set()
+    scoring_stop.set()
     log("⏹️ Stop requested, finishing current operation...", 'warning')
     # Both tabs' Stop buttons come here, so both acknowledge the click. The session
     # itself keeps running until it reaches a checkpoint.
@@ -1642,6 +1909,392 @@ def stop_bot():
             refresh_queue_display()
     except Exception as e:
         logger.debug(f"Error during stop cleanup: {e}")
+
+# ---------------------------
+# SEMANTIC AFFINITY
+# ---------------------------
+# How close a candidate's profile reads to the niche described in the settings.
+# Everything here is arithmetic and text handling: turning either one into a vector
+# is a separate job, handed in, so the model can be absent without any of this
+# having an opinion about it.
+
+def mean_pooled(rows, mask):
+    """One vector for a piece of text, from one vector per token.
+
+    The model returns a vector per token; what is wanted is a vector for the whole
+    text, and the average of the tokens is what these models are trained to be read
+    by. The mask says which positions are real: a batch is padded to a fixed length,
+    and averaging the padding in would drag every short bio towards the same place -
+    the shorter the bio, the more padding, so the pull would be strongest exactly
+    where there is least to go on.
+
+    Pure Python on purpose. It is a few hundred numbers, so the speed is not worth a
+    dependency, and this way it is a part that can be checked without the model.
+    """
+    if not rows:
+        return None
+
+    width = len(rows[0])
+    total = [0.0] * width
+    counted = 0
+
+    for row, keep in zip(rows, mask or []):
+        if not keep:
+            continue
+        counted += 1
+        for index, value in enumerate(row):
+            total[index] += value
+
+    if not counted:
+        return None
+    return [value / counted for value in total]
+
+
+def normalized(vector):
+    """The vector at length 1, or None if it has no length to speak of.
+
+    Cosine divides this out anyway, so this is not what makes the comparison work.
+    It is what makes a stored vector comparable to one made later without carrying
+    the length around, and it keeps the numbers in a range that does not drift.
+    """
+    if not vector:
+        return None
+
+    length = sum(value * value for value in vector) ** 0.5
+    if not length:
+        return None
+    return [value / length for value in vector]
+
+
+def cosine(left, right):
+    """How close two vectors point, from -1 to 1, or None if either says nothing.
+
+    Written out rather than pulled from a library: it is five lines, and a package
+    added here is a package to be found again by the Windows build.
+    """
+    if not left or not right or len(left) != len(right):
+        return None
+
+    dot = sum(a * b for a, b in zip(left, right))
+    size = (sum(a * a for a in left) ** 0.5) * (sum(b * b for b in right) ** 0.5)
+    return dot / size if size else None
+
+
+def affinity_between(profile_vector, niche_vector):
+    """The two vectors as an affinity from 0 to 1, or None if there is not one.
+
+    Opposite directions are floored at 0 rather than kept negative. Below zero the
+    number stops meaning "less like the niche" and starts meaning something about
+    the model's own geometry, which is not a thing to rank people by, and the whole
+    scale is meant to read as "none of it" to "all of it".
+    """
+    closeness = cosine(profile_vector, niche_vector)
+    return None if closeness is None else max(0.0, min(1.0, closeness))
+
+
+def profile_description(header_text):
+    """What a profile says about itself, out of the header's text, or None.
+
+    The header is one run of text with everything in it. Read from a real profile,
+    in order: the username, the display name, the three counts, the category, the
+    bio, the line about people in common, the buttons, and then the names of the
+    highlight covers. So what is wanted is the stretch between the last count and
+    the buttons, which is the category and the bio together.
+
+    They are not told apart, and there is nothing lost by that: Instagram's category
+    and the bio both say what somebody does, and both are going into the same
+    comparison.
+
+    A header with no counts in it is not a header this code understands, and comes
+    back as None rather than as a guess. Same for a profile with nothing written
+    between the counts and the buttons, which is a profile nobody can judge rather
+    than a bad one.
+    """
+    lines = [line.strip() for line in (header_text or "").splitlines() if line.strip()]
+
+    start = None
+    for index, line in enumerate(lines):
+        if parse_labelled_count(line, FOLLOWING_LABEL_MARKERS) is not None:
+            start = index + 1
+            break
+    if start is None:
+        return None
+
+    described = []
+    for line in lines[start:]:
+        lowered = line.lower()
+        if lowered in PROFILE_BUTTON_LABELS or has_marker(lowered, MUTUAL_FOLLOWERS_MARKERS):
+            break
+        described.append(line)
+
+    return "\n".join(described) or None
+
+
+def profile_text(name=None, category=None, bio=None):
+    """The parts of a profile worth comparing, as one piece of text, or None.
+
+    The category is Instagram's own label, filled in from a fixed list rather than
+    written by hand, so it says what somebody does in the same words every time.
+    The bio says it in theirs. The display name is often a real name and says
+    nothing, but it is where some people put what they do, so it goes in last.
+
+    None where there is nothing to read. A profile with an empty bio is common and
+    perfectly good, and it must come back unscored rather than scored badly: it is
+    a profile nobody can judge, not a bad one.
+    """
+    parts = [str(part).strip() for part in (category, bio, name) if part]
+    joined = ". ".join(part for part in parts if part)
+    return joined or None
+
+
+# Where the model lives once it has been fetched, next to everything else the app
+# writes. Deleting the folder is how you make it download again.
+MODEL_DIR = data_path("model")
+
+# A sentence model small enough to run on a CPU while the browser is busy, and
+# multilingual because the bios being read are not all in one language. Quantized,
+# which is what keeps it near a hundred megabytes rather than several hundred.
+#
+# Pinned to a revision rather than to a branch: "main" is whatever the author
+# pushed last, and a model that changes underneath you changes every score with it,
+# silently, with the old numbers still sitting in the queue beside the new ones.
+MODEL_REPO = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+MODEL_REVISION = "main"
+MODEL_FILES = ("onnx/model_quantized.onnx", "tokenizer.json")
+
+# The longest piece of text handed to the model. A bio is short; this is only here
+# so that a profile with a wall of text cannot make one score take a minute.
+MODEL_MAX_TOKENS = 128
+
+
+def model_file(name):
+    """Where one of the model's files sits on disk."""
+    return os.path.join(MODEL_DIR, name.replace('/', os.sep))
+
+
+def model_is_downloaded():
+    return all(os.path.exists(model_file(name)) for name in MODEL_FILES)
+
+
+def file_digest(path):
+    """The SHA-256 of a file, as hex."""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_model(on_progress=None):
+    """Fetch the model files. True if they are all there afterwards.
+
+    Downloaded to a temporary name and renamed once complete, so a download cut off
+    half way cannot leave a file that looks finished. That matters more than usual
+    here: a truncated model does not fail to load, it loads and returns nonsense,
+    and nonsense would come out as affinities that look like numbers.
+
+    The digest of each file is written down beside it and checked on every load
+    afterwards. That catches a file that changed or got damaged after it arrived.
+    It does not check what arrived in the first place against a known good value,
+    which would need that value to be known: the digests are logged, so pinning
+    them later is a matter of reading them out of the log.
+    """
+    import urllib.request
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    digests = {}
+
+    for name in MODEL_FILES:
+        target = model_file(name)
+        if os.path.exists(target):
+            digests[name] = file_digest(target)
+            continue
+
+        url = f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}/{name}"
+        partial = target + ".part"
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+
+        log(f"⬇️ Fetching {name} for the semantic ranking, this happens once", 'info')
+        try:
+            def report(blocks, block_size, total):
+                if on_progress and total > 0:
+                    on_progress(name, min(blocks * block_size, total), total)
+
+            urllib.request.urlretrieve(url, partial, reporthook=report)
+            os.replace(partial, target)
+            digests[name] = file_digest(target)
+        except Exception as e:
+            log(f"❌ Could not fetch {name}: {brief_error(e)}", 'error')
+            logger.debug(f"Model download failed for {url}", exc_info=True)
+            if os.path.exists(partial):
+                os.remove(partial)
+            return False
+
+    try:
+        with open(model_file("digests.json"), 'w', encoding='utf-8') as handle:
+            json.dump(digests, handle, indent=2)
+    except Exception as e:
+        logger.debug(f"Could not record the model digests: {e}")
+
+    for name, digest in digests.items():
+        logger.info(f"Model file {name} sha256 {digest}")
+
+    log("✅ Model ready", 'success')
+    return True
+
+
+def model_files_unchanged():
+    """True if every file still matches what was written down when it arrived."""
+    try:
+        with open(model_file("digests.json"), 'r', encoding='utf-8') as handle:
+            recorded = json.load(handle)
+    except Exception:
+        return True  # Nothing to check against is not the same as a mismatch
+
+    for name, digest in recorded.items():
+        path = model_file(name)
+        if os.path.exists(path) and file_digest(path) != digest:
+            log(f"⚠️ {name} is not the file that was downloaded - ignoring the model", 'warning')
+            return False
+    return True
+
+
+class SemanticModel:
+    """Turns a piece of text into a vector, if it can.
+
+    Absent is a normal state, not an error. The packages may not be installed, the
+    download may have failed, the machine may be offline. Every one of those ends
+    with available() saying no and the app carrying on exactly as it did before any
+    of this existed - a queue ranked on sighting counts alone, which is what it was
+    ranked on for its whole life so far.
+
+    Loaded on first use rather than at startup: it costs a second and a couple of
+    hundred megabytes, and most runs of the app never follow anybody.
+    """
+
+    def __init__(self):
+        self.session = None
+        self.tokenizer = None
+        self.numpy = None
+        self.failed = False
+
+    def load(self):
+        """Bring the model up. True if it is usable afterwards."""
+        if self.session is not None:
+            return True
+        if self.failed:
+            return False
+
+        try:
+            import numpy
+            import onnxruntime
+            from tokenizers import Tokenizer
+        except ImportError as e:
+            log(f"ℹ️ Semantic ranking is off: {brief_error(e)}", 'info')
+            logger.info("Install onnxruntime and tokenizers to turn it on")
+            self.failed = True
+            return False
+
+        if not model_is_downloaded() and not download_model():
+            self.failed = True
+            return False
+
+        if not model_files_unchanged():
+            self.failed = True
+            return False
+
+        try:
+            self.tokenizer = Tokenizer.from_file(model_file("tokenizer.json"))
+            self.tokenizer.enable_truncation(max_length=MODEL_MAX_TOKENS)
+            self.session = onnxruntime.InferenceSession(
+                model_file("onnx/model_quantized.onnx"),
+                providers=["CPUExecutionProvider"],
+            )
+            self.numpy = numpy
+        except Exception as e:
+            log(f"❌ The model would not load: {brief_error(e)}", 'error')
+            logger.exception("Loading the semantic model failed")
+            self.failed = True
+            return False
+
+        logger.info(f"Semantic model ready, inputs: {[i.name for i in self.session.get_inputs()]}")
+        return True
+
+    def available(self):
+        return self.load()
+
+    def embed(self, text):
+        """One vector for a piece of text, or None if it could not be made.
+
+        Never raises. A profile that cannot be turned into a vector has to come back
+        unscored, the same as one with nothing written on it: the pass carries on
+        and that candidate keeps their sighting count.
+        """
+        if not (text or "").strip() or not self.load():
+            return None
+
+        try:
+            encoded = self.tokenizer.encode(text)
+            if not encoded.ids:
+                return None
+
+            # Which inputs to hand over is read off the model rather than assumed.
+            # Exports of the same model differ over token_type_ids, and a missing
+            # input is a hard failure at the first score rather than a wrong number.
+            available_inputs = {
+                "input_ids": encoded.ids,
+                "attention_mask": encoded.attention_mask,
+                "token_type_ids": encoded.type_ids,
+            }
+            feed = {
+                spec.name: self.numpy.array([available_inputs[spec.name]], dtype=self.numpy.int64)
+                for spec in self.session.get_inputs()
+                if spec.name in available_inputs
+            }
+
+            outputs = self.session.run(None, feed)
+            rows = outputs[0][0].tolist()
+        except Exception as e:
+            logger.debug(f"Could not embed a piece of text: {e}", exc_info=True)
+            return None
+
+        return normalized(mean_pooled(rows, encoded.attention_mask))
+
+
+semantic_model = SemanticModel()
+
+
+def make_affinity_scorer(read_profile, embed, niche):
+    """A function from username to affinity, for score_queue().
+
+    `read_profile` returns whatever the browser can see of a profile as a
+    (name, category, bio) triple; `embed` turns a piece of text into a vector.
+    Both are handed in: one needs a browser and the other needs a model, and
+    neither belongs in the arithmetic.
+
+    The niche is embedded once here rather than per candidate. It does not change
+    while a pass runs, and it is the same cost as a profile every time.
+
+    Returns None if there is nothing to compare against, so a pass with no niche
+    written, or no model to be had, scores nobody rather than scoring everybody
+    zero.
+    """
+    if not (niche or "").strip():
+        return None
+
+    niche_vector = embed(niche.strip())
+    if not niche_vector:
+        return None
+
+    def score(username):
+        name, category, bio = read_profile(username)
+        text = profile_text(name=name, category=category, bio=bio)
+        if text is None:
+            return None
+        return affinity_between(embed(text), niche_vector)
+
+    return score
+
 
 # ---------------------------
 # SCRAPING FUNCTIONS
@@ -2416,6 +3069,127 @@ def read_profile_stats():
         read(raw.get('followers'), FOLLOWERS_LABEL_MARKERS, "follower"),
         read(raw.get('following'), FOLLOWING_LABEL_MARKERS, "following"),
     )
+
+
+def read_candidate_profile(username):
+    """Open a candidate's profile and read what it says about itself.
+
+    Comes back as the (name, category, bio) that make_affinity_scorer wants. Only
+    the last is filled in: the header is one run of text, and profile_description()
+    takes the part of it that describes the account rather than counting it.
+
+    Never raises, and never guesses. A page that will not load, or that Instagram
+    answers with somebody else's profile, leaves the candidate unscored - which
+    keeps their sighting count and their place, rather than recording a number
+    about a profile that was never read.
+    """
+    nothing = (None, None, None)
+    header_text = None
+
+    try:
+        driver.get(f"https://www.instagram.com/{username}/")
+        wait_for_element(driver, By.TAG_NAME, "header")
+
+        # Instagram answers a visit to some profiles with a page of suggestions.
+        # Reading that would score this candidate on a stranger's bio.
+        if username.lower() not in driver.current_url.lower():
+            logger.info(f"Asked for {username} and landed somewhere else, leaving it unscored")
+            return nothing
+
+        # Asked for repeatedly until the counts are in it, rather than waited out on
+        # a timer. The header element exists before its contents do, so something
+        # has to give the page a moment - but a fixed pause is the wrong shape for
+        # it, since it is both too long on nearly every profile and too short on the
+        # slow one. The counts are the sign that the header has filled in.
+        for attempt in range(12):
+            raw = driver.execute_script(PROFILE_STATS_JS) or {}
+            header_text = raw.get('headerText') or ""
+            if parse_labelled_count(header_text, FOLLOWING_LABEL_MARKERS) is not None:
+                break
+            time.sleep(0.25)
+    except WebDriverException as e:
+        logger.info(f"Could not read {username}: {type(e).__name__}")
+        return nothing
+    finally:
+        # Reading a profile is not following one, so this is a fraction of what the
+        # follow delays are, and it can be set to nothing. It is not zero by default
+        # because several hundred profile views in a row, as fast as a machine can
+        # ask for them, is the shape of the thing Instagram is watching for.
+        pace = max(0, CONFIG["SEMANTIC_READ_DELAY"])
+        if pace:
+            time.sleep(random.uniform(pace, pace * 2))
+
+    if not header_text:
+        # A header that never filled in is where a block would be showing, so this
+        # is the one place worth paying for the check - the page text it reads costs
+        # more than the pause above, which is why it is not run on every profile.
+        if check_rate_limit(driver):
+            log("⏸️ Instagram is throttling, waiting a minute before carrying on", 'warning')
+            time.sleep(60)
+        return nothing
+
+    return None, None, profile_description(header_text)
+
+
+def run_scoring_pass(after_stop=False):
+    """Hold the queue to size, then read and score everyone left in it.
+
+    Runs at the end of a search rather than during a follow session. The browser is
+    already up and already reading heavily here, and a follow session stays exactly
+    as quick as it has always been.
+
+    `after_stop` says the search was cut short by hand. That is not a reason to skip
+    this: a stopped search has still put everything it found into the queue, and
+    that queue wants sorting as much as a finished one does - more, really, since it
+    is the one about to be worked through. So the pass gets its own stop flag and
+    clears it here, and the next press of Stop is what ends the scoring as well.
+
+    Every way of not being able to score leaves the queue ordered on sighting counts
+    alone, which is what it was ordered on before any of this existed. None of them
+    is an error.
+    """
+    if not CONFIG["SEMANTIC_ENABLED"]:
+        return
+
+    scoring_stop.clear()
+    if after_stop:
+        log("🧭 Search stopped. Scoring what it found - press Stop again to skip", 'info')
+
+    niche = str(CONFIG.get("SEMANTIC_NICHE") or "").strip()
+    if not niche:
+        log("ℹ️ No niche written in the settings, so nothing is scored", 'info')
+        return
+
+    scorer = make_affinity_scorer(read_candidate_profile, semantic_model.embed, niche)
+    if scorer is None:
+        log("ℹ️ Semantic ranking is off, the queue keeps its order by sightings", 'info')
+        return
+
+    # Held to size first, then every one of those read. The other way round - read
+    # the best few hundred, then keep more of them than that - leaves a queue where
+    # some entries have been read and some have not, and those two are not ordered
+    # on the same thing. One number, and everybody in the queue has been looked at.
+    dropped = trim_queue()
+    if dropped:
+        log(
+            f"✂️ Kept the top {CONFIG['SEMANTIC_TOP_K']}, so {dropped} candidates "
+            f"left the queue. Their sighting counts stay on file, so a later search "
+            f"that finds them again picks up where this one left off",
+            'info'
+        )
+
+    def on_progress(number, total, username):
+        if number == 1 or number % 25 == 0:
+            log(f"🧭 Scoring {number}/{total}...", 'info')
+
+    scored = score_queue(scorer, on_progress=on_progress)
+    if scored:
+        log(f"🧭 Scored {scored} profiles against your niche", 'success')
+
+    try:
+        refresh_queue_display()
+    except Exception as e:
+        logger.debug(f"Could not refresh the queue display: {e}")
 
 
 def profile_bot_reason():
@@ -3343,6 +4117,20 @@ def follow_logic():
             refresh_queue_display()
             update_live_extraction_display()
 
+            # Here, and not at the end of the search: the search is called with
+            # add_to_queue_limit=0, so until the line above ran, the users it found
+            # were not in the queue at all. Scoring before that read an empty queue,
+            # loaded the model for nothing and scored no one.
+            #
+            # Both answers that keep the results get scored, including the one that
+            # follows straight away - which is the whole point, since that is the
+            # run whose order the scoring changes.
+            try:
+                run_scoring_pass(after_stop=stop_requested.is_set())
+            except Exception as e:
+                log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
+                logger.exception("The scoring pass failed")
+
             if result:  # YES - Save to queue and STOP
                 log("🛑 Scraping complete. Start following manually when ready.", 'success')
                 report = stats.report()
@@ -3430,8 +4218,18 @@ def refresh_queue_display():
     # reconstruct the ordering and cannot disagree with what is on screen.
     displayed_queue_usernames = [username for username, _, _ in ranked[:100]]
 
-    for user, rank, _ in ranked[:100]:  # Show first 100
-        queue_listbox.insert(tk.END, f"[{rank}] {user}" if rank > 0 else user)
+    # The row says what the order is made of, not the number it comes out as: how
+    # many scanned authors this candidate follows, and how close their profile read
+    # to the niche where that has been measured. A single 0.61 on screen would sort
+    # the list correctly and tell you nothing about why.
+    frequencies = ranking_frequencies()
+    for user, _, item in ranked[:100]:  # Show first 100
+        seen = frequencies.get(user, 0)
+        affinity = queue_affinity(item)
+        parts = [str(seen)] if seen else []
+        if affinity is not None:
+            parts.append(f"{affinity:.0%}")
+        queue_listbox.insert(tk.END, f"[{' · '.join(parts)}] {user}" if parts else user)
 
     if len(ranked) > 100:
         queue_listbox.insert(tk.END, f"... and {len(ranked) - 100} more")
@@ -3771,6 +4569,71 @@ def setup_gui():
         variable=mode_var,
         value='queue'
     ).pack(anchor='w', pady=2)
+
+    # Scoring is a phase between the search and the following, and nothing either
+    # side of it depends on having happened. So it gets a switch here rather than a
+    # number in the settings: it is the sort of thing to change your mind about
+    # while looking at the tab you start a search from.
+    semantic_var = tk.IntVar(value=1 if CONFIG["SEMANTIC_ENABLED"] else 0)
+
+    # The niche belongs here rather than in the settings: it is the question the
+    # scoring asks, so it is read and changed at the same moment as the switch that
+    # turns the scoring on, not two tabs away among the numbers.
+    niche_frame = ttk.Frame(mode_frame)
+    niche_label = ttk.Label(niche_frame, text='Niche:')
+    niche_entry = ttk.Entry(niche_frame)
+    niche_entry.insert(0, str(CONFIG.get("SEMANTIC_NICHE") or ""))
+
+    def save_niche(event=None):
+        """Keep what was typed. Bound to leaving the field and to pressing Enter."""
+        typed = niche_entry.get().strip()
+        if typed != str(CONFIG.get("SEMANTIC_NICHE") or ""):
+            CONFIG["SEMANTIC_NICHE"] = typed
+            save_config(CONFIG)
+            log(f"🧭 Niche set to: {typed}" if typed else "🧭 Niche cleared", 'info')
+
+    niche_entry.bind('<FocusOut>', save_niche)
+    niche_entry.bind('<Return>', save_niche)
+
+    def toggle_semantic():
+        on = bool(semantic_var.get())
+        CONFIG["SEMANTIC_ENABLED"] = 1 if on else 0
+        save_config(CONFIG)
+
+        # Nothing to describe while the scoring is off, so the field says so by
+        # being unusable rather than by sitting there inviting an answer to a
+        # question nobody is going to ask.
+        niche_entry.config(state='normal' if on else 'disabled')
+        niche_label.config(foreground='' if on else 'gray')
+
+        if on:
+            log("🧭 Profiles will be scored against your niche after a search", 'info')
+            if not str(CONFIG.get("SEMANTIC_NICHE") or "").strip():
+                log("   Describe who you are looking for in the Niche box", 'info')
+        else:
+            log("🧭 Scoring off - the queue keeps its order by sightings", 'info')
+
+    ttk.Checkbutton(
+        mode_frame,
+        text='🧭 Score profiles against my niche after the search',
+        variable=semantic_var,
+        command=toggle_semantic
+    ).pack(anchor='w', pady=(6, 0))
+
+    niche_frame.pack(fill='x', pady=(2, 0), padx=(20, 0))
+    niche_label.pack(side='left', padx=(0, 5))
+    niche_entry.pack(side='left', fill='x', expand=True)
+    ToolTip(
+        niche_entry,
+        "Who you are looking for, as a sentence rather than keywords - the model "
+        "reads it the way it reads a bio.\n"
+        "Example: fotografi che scattano su pellicola e mostrano il loro lavoro"
+    )
+
+    # Match the field to the switch as it is drawn, not only when it is clicked.
+    if not semantic_var.get():
+        niche_entry.config(state='disabled')
+        niche_label.config(foreground='gray')
 
     main_queue_info = ttk.Label(
         mode_frame,
@@ -4144,6 +5007,7 @@ def setup_gui():
         config_entries[config_key] = entry
         return entry
 
+
     # ─── EXTRACTION SETTINGS ───
     extraction_frame = ttk.LabelFrame(settings_scrollable_frame, text='🔍 Extraction Settings', padding=10)
     extraction_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
@@ -4192,6 +5056,28 @@ def setup_gui():
                       "← Reject a profile following more accounts than this")
     create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
                       "← Reject when following exceeds followers by this many times")
+
+    # ─── SEMANTIC RANKING ───
+    semantic_frame = ttk.LabelFrame(
+        settings_scrollable_frame, text='🧭 Semantic Ranking', padding=10
+    )
+    semantic_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+
+    create_config_row(semantic_frame, 0, "SEMANTIC_WEIGHT", "SEMANTIC_WEIGHT",
+                      "← 0-100. How much of a candidate's rank is the niche rather "
+                      "than how often they were seen. 0 is the order without it")
+    create_config_row(semantic_frame, 1, "SEMANTIC_TOP_K", "SEMANTIC_TOP_K",
+                      "← Candidates kept after a search. Every one of them is read, "
+                      "one page load each, so this is what the pass costs")
+    create_config_row(semantic_frame, 2, "SEMANTIC_READ_DELAY", "SEMANTIC_READ_DELAY",
+                      "← Seconds between profiles while reading. 0 is as fast as the "
+                      "pages load")
+
+    ttk.Label(
+        semantic_frame,
+        text="Switched on, and the niche described, on the Auto Follow tab.",
+        foreground='gray', font=('Helvetica', 8)
+    ).grid(row=3, column=0, columnspan=3, sticky='w', pady=(8, 0))
 
     unfollow_settings_frame = ttk.LabelFrame(settings_scrollable_frame, text='🚫 Unfollow Settings', padding=10)
     unfollow_settings_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
