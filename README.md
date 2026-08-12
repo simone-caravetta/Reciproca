@@ -73,7 +73,8 @@ with the Instagram account it was recorded against: export again and load the ne
 files to carry on. **Reset** discards it on purpose, and says what it will delete
 first.
 
-##Semantic Ranking
+## Semantic Ranking
+
 * Rank a candidate on one number
 
 Groundwork for scoring a candidate's profile against the niche you describe. This
@@ -96,7 +97,7 @@ embedding multi language mode that runs on your ram and cpu (150-200mb).
 
 ## Coming soon
 
-- DONE Semantic ranking of candidates during Deep Search, powered by AI
+- [DONE] Semantic ranking of candidates during Deep Search, powered by AI
 - More Instagram interface languages (see below)
 
 ## Instagram language support
