@@ -49,6 +49,9 @@ ChromeDriver on first run.
 2. Choose **Deep Search** (finds new candidates via hashtags, the default) or
    **Follow from Queue**.
 3. Set the delays and the session limit, then **Start Following**.
+4. Select "Score profile against my Niche", enabling embedding model to add its
+   user evaluation score inside ranking calculus (see Semantic Ranking for further
+   info).
 
 Candidates are ranked by how many of the scanned hashtag authors they already
 follow, a score that adds up across sessions. Following starts from the top of that
