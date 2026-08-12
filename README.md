@@ -93,7 +93,7 @@ The two are then weighed:
 
 Affinity is given by comparing your prompt of a desired kind of user and the profile
 description found in user page on instagram. The comparison is given by a little 
-embedding multi language mode that runs on your ram and cpu (150-200mb). 
+embedding multi language model that runs on your ram and cpu (150-200mb). 
 
 ## Coming soon
 
