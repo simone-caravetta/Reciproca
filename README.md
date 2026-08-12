@@ -63,7 +63,7 @@ keep finding new people instead of the same few.
 
 1. In Instagram: **Settings → Privacy and security → Download your data**, request
    JSON, and download `followers_1.json` and `following.json`.
-2. **🚫 Unfollow** → **Open Browser** (one browser is shared with the Follow tab).
+2. **Unfollow** → **Open Browser** (one browser is shared with the Follow tab).
 3. **Load JSON** and pick the two files. Reciproca works out who doesn't follow
    you back.
 4. Set the delays and the session limit, then **Start Unfollow**.
