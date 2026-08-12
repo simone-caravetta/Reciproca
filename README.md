@@ -44,7 +44,8 @@ Google Chrome must be installed; `webdriver-manager` downloads the matching
 ChromeDriver on first run.
 
 Reciproca downloads a little Embedding Model at runtime the first time you
-execute the Semantic Evaluation.
+execute the Semantic Evaluation. You can find the same model under:
+"Xenova/paraphrase-multilingual-MiniLM-L12-v2"
 
 ## Follow
 
