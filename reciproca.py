@@ -69,6 +69,12 @@ CONFIG = {
     "BOT_MAX_FOLLOWING": 3000,
     "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
 
+    # Author follow - follow scraped authors whose following/followers ratio
+    # looks like they would follow back. Checked on the author's page, before
+    # their followers are extracted.
+    "AUTHOR_FOLLOW_ENABLED": 1,             # 1 follows the author of a scraped post
+    "AUTHOR_MAX_FOLLOWERS_RATIO": 5,        # Reject followers > this many x following
+
     # Semantic ranking - how close a candidate's profile reads to the niche you
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
@@ -292,6 +298,27 @@ def bot_rejection_reason(posts, followers, following):
     if (followers is not None and following is not None
             and following > followers * CONFIG["BOT_MAX_FOLLOWING_RATIO"]):
         return f"follows {following} but has {followers} followers"
+
+    return None
+
+
+def author_rejection_reason(posts, followers, following):
+    """Why a scraped author should not be followed back, or None to allow it.
+
+    Authors are followed for the follow-back they can give, so a profile with far
+    more followers than accounts it follows is not a candidate: that audience does
+    not follow back. Unlike the bot filter this does NOT fail open - an author
+    whose counts cannot be read cannot vouch for a follow-back, so it is skipped
+    too.
+    """
+    if followers is None or following is None:
+        return "counts unreadable"
+
+    if following == 0:
+        return "follows nobody"
+
+    if followers > following * CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"]:
+        return f"{followers} followers but only follows {following}"
 
     return None
 
@@ -569,6 +596,23 @@ return {
 };
 """
 
+# The logged-in account's username, read from the sidebar instead of a cookie:
+# ds_user_id carries only the numeric id, while the profile link's href carries
+# the name itself - no localized alt text to match, no page to navigate to.
+#
+# The sidebar holds one link per destination. Home is a bare "/" and the rest
+# are multi-segment ("/direct/inbox/"), so the profile link is the only one
+# whose href is a single bare username. The followers dialog adds no nav.
+OWN_PROFILE_JS = """
+const nav = document.querySelector('nav');
+if (!nav) return null;
+for (const link of nav.querySelectorAll('a[href^="/"]')) {
+    const match = (link.getAttribute('href') || '').match(/^\\/([^\\/]+)\\/?$/);
+    if (match) return match[1];
+}
+return null;
+"""
+
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -596,6 +640,8 @@ def load_config():
         "BOT_MIN_FOLLOWERS": 10,
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
+        "AUTHOR_FOLLOW_ENABLED": 1,
+        "AUTHOR_MAX_FOLLOWERS_RATIO": 5,
         "SEMANTIC_ENABLED": 1,
         "SEMANTIC_WEIGHT": 60,
         "SEMANTIC_TOP_K": 200,
@@ -847,10 +893,14 @@ def add_to_queue(usernames):
     # Add only new usernames (not already in queue and not already followed)
     existing_in_queue = {queue_username(item) for item in queue}
 
+    me = own_username()
+
     new_users = []
 
     for username in usernames:
-        if username not in existing_in_queue and not is_already_followed(username):
+        if me and username.lower() == me:
+            logger.debug(f"Skipping own profile - never queued: {username}")
+        elif username not in existing_in_queue and not is_already_followed(username):
             new_users.append(username)
         elif is_already_followed(username):
             logger.debug(f"Skipping {username} - already in followed history")
@@ -1268,6 +1318,35 @@ def current_account_id():
     except WebDriverException as e:
         logger.info(f"Could not read the logged-in account: {type(e).__name__}")
         return None
+
+
+# Cached here rather than in CONFIG: the own account is whatever the browser is
+# logged into, which is not a setting - it changes when the profile does.
+_own_username = None
+
+
+def own_username():
+    """Username of the logged-in account, or None when it could not be read.
+
+    Read from the sidebar's profile link, so it follows the account the browser
+    is actually logged into - nothing to configure, and nothing to break when
+    the account changes. Only successful reads are cached, so a page that was
+    not ready yet is retried on the next call instead of remembered as 'no
+    account'. The cache is reset when a session begins.
+    """
+    global _own_username
+    if _own_username is not None:
+        return _own_username
+    if driver is None:
+        return None
+    try:
+        username = driver.execute_script(OWN_PROFILE_JS)
+        if username:
+            _own_username = str(username).lower()
+            logger.info(f"Own username detected: {_own_username}")
+    except WebDriverException as e:
+        logger.info(f"Could not read the logged-in username: {type(e).__name__}")
+    return _own_username
 
 
 def uf_progress_archive(account_id):
@@ -1797,6 +1876,10 @@ def begin_session():
 
     session_running.set()
     stop_requested.clear()
+    # The account may have changed since the last session; the next read has to
+    # come from the browser, not from whatever the previous session cached.
+    global _own_username
+    _own_username = None
     update_follow_ui_state()
     update_unfollow_ui_state()
     return True
@@ -2807,21 +2890,30 @@ def extract_users_from_followers(current_hashtag="", author_num=0, total_authors
 
             # Second, independent net: the bot's own history. Covers users
             # followed in an earlier session whose button Instagram has not
-            # refreshed yet.
+            # refreshed yet. Third: the bot's own profile, which sits in every
+            # author's follower list once the author is followed back - it must
+            # never become a candidate for itself.
             filtered_users = []
             skipped_history = 0
+            skipped_self = 0
+            me = own_username()
             for user in candidates:
-                if is_already_followed(user):
+                if me and user.lower() == me:
+                    skipped_self += 1
+                    logger.debug(f"Filtered out own profile from extraction: {user}")
+                elif is_already_followed(user):
                     skipped_history += 1
                     logger.debug(f"Filtered out already followed user (history): {user}")
                 else:
                     filtered_users.append(user)
 
-            total_skipped = skipped_following + skipped_history
+            total_skipped = skipped_following + skipped_history + skipped_self
+            reasons = [f"{skipped_following} by button", f"{skipped_history} by history"]
+            if skipped_self:
+                reasons.append(f"{skipped_self} own profile")
             log(
                 f"📊 Extracted {len(filtered_users)} candidates "
-                f"({rows_inspected} rows, skipped {total_skipped} already followed: "
-                f"{skipped_following} by button, {skipped_history} by history)"
+                f"({rows_inspected} rows, skipped {total_skipped}: {', '.join(reasons)})"
             )
 
             # If not a single row yielded a button, the row lookup is broken -
@@ -3192,15 +3284,23 @@ def run_scoring_pass(after_stop=False):
         logger.debug(f"Could not refresh the queue display: {e}")
 
 
-def profile_bot_reason():
-    """Why the profile in the browser looks automated, or None to follow it."""
-    # The header can render before the counts arrive, so give them a moment.
+def read_profile_stats_retried():
+    """Profile counts with a short retry, since the header can render before them.
+
+    Returns (posts, followers, following), None where a count stayed unread.
+    """
     for attempt in range(3):
         posts, followers, following = read_profile_stats()
         if None not in (posts, followers, following):
             break
         if attempt < 2:
             time.sleep(1)
+    return posts, followers, following
+
+
+def profile_bot_reason():
+    """Why the profile in the browser looks automated, or None to follow it."""
+    posts, followers, following = read_profile_stats_retried()
 
     missing = [
         name for name, value in
@@ -3222,6 +3322,85 @@ def profile_bot_reason():
         f"following={following} -> {reason or 'ok'}"
     )
     return reason
+
+
+def follow_author(username):
+    """Follow the author whose profile is open in the current window.
+
+    The author's page is visited anyway for their followers, so the follow costs
+    no extra page load - it only checks the button and the counts already on
+    screen. Followed only when the profile looks like it would follow back: not
+    already followed, and with a balanced following/followers ratio. A rejected
+    author is not written to the history, so a later session can re-evaluate
+    them - ratios change, and the point is the follow-back, not a verdict.
+
+    Never raises: a failure here must not cost the author's follower extraction.
+    """
+    try:
+        stats.increment('attempted')
+
+        # Wait for profile
+        wait_for_element(driver, By.TAG_NAME, "header")
+        time.sleep(1)  # Let page settle
+
+        if is_already_followed(username):
+            log(f"⏭️ Author {username} already in history - not following", 'warning')
+            return False, "already_followed"
+
+        btn, status = find_follow_button()
+
+        if status == "already_following":
+            log(f"⏭️ Author {username} already following", 'warning')
+            log_followed_user(username, "already_following")
+            return False, "already_following"
+
+        if status != "follow" or not btn:
+            log(f"⚠️ Author {username} | no follow button ({status})", 'warning')
+            return False, status or "no_button"
+
+        posts, followers, following = read_profile_stats_retried()
+        author_reason = author_rejection_reason(posts, followers, following)
+        if author_reason:
+            log(f"🚫 Author {username} skipped | {author_reason}", 'warning')
+            return False, "filtered_author"
+
+        # Store button reference for validation comparison
+        original_btn = btn
+
+        # Try to click the button
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", btn)
+        except Exception as e:
+            # Fallback to regular click
+            try:
+                btn.click()
+            except:
+                return False, f"click_failed: {e}"
+
+        # Verify success with original button reference
+        if validate_follow_success(original_btn, username):
+            stats.increment('succeeded')
+            log_followed_user(username, "success")
+            log(f"✅ Followed author {username}", 'success')
+            return True, None
+        else:
+            # Still might have worked, check button again after extra wait
+            time.sleep(2)
+            _, new_status = find_follow_button()
+            if new_status == "already_following":
+                stats.increment('succeeded')
+                log_followed_user(username, "success")
+                log(f"✅ Followed author {username}", 'success')
+                return True, None
+            stats.increment('errors')
+            return False, "validation_failed"
+
+    except Exception as e:
+        stats.increment('errors')
+        logger.debug(f"follow_author failed for {username}: {e}", exc_info=True)
+        return False, str(e)
 
 
 def follow_user(username, delay_min, delay_max):
@@ -3764,6 +3943,13 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         # window was left behind for each one.
         try:
             time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
+
+            # The author's page is open anyway, and we are already on it: follow
+            # them before the followers popup takes over the window. The balance
+            # check runs here, not at follow time, because the author is never
+            # queued - this is the only visit.
+            if CONFIG["AUTHOR_FOLLOW_ENABLED"]:
+                follow_author(username)
 
             if open_followers_popup():
                 users = extract_users_from_followers(
@@ -5056,6 +5242,15 @@ def setup_gui():
                       "← Reject a profile following more accounts than this")
     create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
                       "← Reject when following exceeds followers by this many times")
+
+    # ─── AUTHOR FOLLOW ───
+    author_frame = ttk.LabelFrame(settings_scrollable_frame, text='👤 Author Follow', padding=10)
+    author_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+
+    create_config_row(author_frame, 0, "AUTHOR_FOLLOW_ENABLED", "AUTHOR_FOLLOW_ENABLED",
+                      "← 1 to follow scraped authors before extracting their followers")
+    create_config_row(author_frame, 1, "AUTHOR_MAX_FOLLOWERS_RATIO", "AUTHOR_MAX_FOLLOWERS_RATIO",
+                      "← Skip an author whose followers exceed their following by this many times")
 
     # ─── SEMANTIC RANKING ───
     semantic_frame = ttk.LabelFrame(
