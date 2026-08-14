@@ -4445,7 +4445,7 @@ def setup_gui():
 
     root = tk.Tk()
     root.title("Reciproca - Follow & Unfollow")
-    root.geometry("800x700")
+    root.geometry("800x800")
     root.minsize(700, 600)
 
     # Center window
