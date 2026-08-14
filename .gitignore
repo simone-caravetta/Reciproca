@@ -36,3 +36,4 @@ dist/
 # Node modules for the optional DOM test
 node_modules/
 package-lock.json
+.claude/settings.local.json
