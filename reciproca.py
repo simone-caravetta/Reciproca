@@ -69,6 +69,12 @@ CONFIG = {
     "BOT_MAX_FOLLOWING": 3000,
     "BOT_MAX_FOLLOWING_RATIO": 5,           # Reject following > this many x followers
 
+    # Author follow - follow scraped authors whose following/followers ratio
+    # looks like they would follow back. Checked on the author's page, before
+    # their followers are extracted.
+    "AUTHOR_FOLLOW_ENABLED": 1,             # 1 follows the author of a scraped post
+    "AUTHOR_MAX_FOLLOWERS_RATIO": 5,        # Reject followers > this many x following
+
     # Semantic ranking - how close a candidate's profile reads to the niche you
     # describe, scored after a search on the strongest candidates it found.
     "SEMANTIC_ENABLED": 1,                  # 0 skips the scoring pass entirely
@@ -292,6 +298,27 @@ def bot_rejection_reason(posts, followers, following):
     if (followers is not None and following is not None
             and following > followers * CONFIG["BOT_MAX_FOLLOWING_RATIO"]):
         return f"follows {following} but has {followers} followers"
+
+    return None
+
+
+def author_rejection_reason(posts, followers, following):
+    """Why a scraped author should not be followed back, or None to allow it.
+
+    Authors are followed for the follow-back they can give, so a profile with far
+    more followers than accounts it follows is not a candidate: that audience does
+    not follow back. Unlike the bot filter this does NOT fail open - an author
+    whose counts cannot be read cannot vouch for a follow-back, so it is skipped
+    too.
+    """
+    if followers is None or following is None:
+        return "counts unreadable"
+
+    if following == 0:
+        return "follows nobody"
+
+    if followers > following * CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"]:
+        return f"{followers} followers but only follows {following}"
 
     return None
 
@@ -596,6 +623,8 @@ def load_config():
         "BOT_MIN_FOLLOWERS": 10,
         "BOT_MAX_FOLLOWING": 3000,
         "BOT_MAX_FOLLOWING_RATIO": 5,
+        "AUTHOR_FOLLOW_ENABLED": 1,
+        "AUTHOR_MAX_FOLLOWERS_RATIO": 5,
         "SEMANTIC_ENABLED": 1,
         "SEMANTIC_WEIGHT": 60,
         "SEMANTIC_TOP_K": 200,
@@ -3192,15 +3221,23 @@ def run_scoring_pass(after_stop=False):
         logger.debug(f"Could not refresh the queue display: {e}")
 
 
-def profile_bot_reason():
-    """Why the profile in the browser looks automated, or None to follow it."""
-    # The header can render before the counts arrive, so give them a moment.
+def read_profile_stats_retried():
+    """Profile counts with a short retry, since the header can render before them.
+
+    Returns (posts, followers, following), None where a count stayed unread.
+    """
     for attempt in range(3):
         posts, followers, following = read_profile_stats()
         if None not in (posts, followers, following):
             break
         if attempt < 2:
             time.sleep(1)
+    return posts, followers, following
+
+
+def profile_bot_reason():
+    """Why the profile in the browser looks automated, or None to follow it."""
+    posts, followers, following = read_profile_stats_retried()
 
     missing = [
         name for name, value in
@@ -3222,6 +3259,85 @@ def profile_bot_reason():
         f"following={following} -> {reason or 'ok'}"
     )
     return reason
+
+
+def follow_author(username):
+    """Follow the author whose profile is open in the current window.
+
+    The author's page is visited anyway for their followers, so the follow costs
+    no extra page load - it only checks the button and the counts already on
+    screen. Followed only when the profile looks like it would follow back: not
+    already followed, and with a balanced following/followers ratio. A rejected
+    author is not written to the history, so a later session can re-evaluate
+    them - ratios change, and the point is the follow-back, not a verdict.
+
+    Never raises: a failure here must not cost the author's follower extraction.
+    """
+    try:
+        stats.increment('attempted')
+
+        # Wait for profile
+        wait_for_element(driver, By.TAG_NAME, "header")
+        time.sleep(1)  # Let page settle
+
+        if is_already_followed(username):
+            log(f"⏭️ Author {username} already in history - not following", 'warning')
+            return False, "already_followed"
+
+        btn, status = find_follow_button()
+
+        if status == "already_following":
+            log(f"⏭️ Author {username} already following", 'warning')
+            log_followed_user(username, "already_following")
+            return False, "already_following"
+
+        if status != "follow" or not btn:
+            log(f"⚠️ Author {username} | no follow button ({status})", 'warning')
+            return False, status or "no_button"
+
+        posts, followers, following = read_profile_stats_retried()
+        author_reason = author_rejection_reason(posts, followers, following)
+        if author_reason:
+            log(f"🚫 Author {username} skipped | {author_reason}", 'warning')
+            return False, "filtered_author"
+
+        # Store button reference for validation comparison
+        original_btn = btn
+
+        # Try to click the button
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", btn)
+        except Exception as e:
+            # Fallback to regular click
+            try:
+                btn.click()
+            except:
+                return False, f"click_failed: {e}"
+
+        # Verify success with original button reference
+        if validate_follow_success(original_btn, username):
+            stats.increment('succeeded')
+            log_followed_user(username, "success")
+            log(f"✅ Followed author {username}", 'success')
+            return True, None
+        else:
+            # Still might have worked, check button again after extra wait
+            time.sleep(2)
+            _, new_status = find_follow_button()
+            if new_status == "already_following":
+                stats.increment('succeeded')
+                log_followed_user(username, "success")
+                log(f"✅ Followed author {username}", 'success')
+                return True, None
+            stats.increment('errors')
+            return False, "validation_failed"
+
+    except Exception as e:
+        stats.increment('errors')
+        logger.debug(f"follow_author failed for {username}: {e}", exc_info=True)
+        return False, str(e)
 
 
 def follow_user(username, delay_min, delay_max):
@@ -3764,6 +3880,13 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         # window was left behind for each one.
         try:
             time.sleep(random.uniform(2.0, 3.5))  # Randomized window switch delay
+
+            # The author's page is open anyway, and we are already on it: follow
+            # them before the followers popup takes over the window. The balance
+            # check runs here, not at follow time, because the author is never
+            # queued - this is the only visit.
+            if CONFIG["AUTHOR_FOLLOW_ENABLED"]:
+                follow_author(username)
 
             if open_followers_popup():
                 users = extract_users_from_followers(
@@ -5056,6 +5179,15 @@ def setup_gui():
                       "← Reject a profile following more accounts than this")
     create_config_row(bot_frame, 4, "BOT_MAX_FOLLOWING_RATIO", "BOT_MAX_FOLLOWING_RATIO",
                       "← Reject when following exceeds followers by this many times")
+
+    # ─── AUTHOR FOLLOW ───
+    author_frame = ttk.LabelFrame(settings_scrollable_frame, text='👤 Author Follow', padding=10)
+    author_frame.pack(fill='x', pady=(0, 10), padx=5, expand=True)
+
+    create_config_row(author_frame, 0, "AUTHOR_FOLLOW_ENABLED", "AUTHOR_FOLLOW_ENABLED",
+                      "← 1 to follow scraped authors before extracting their followers")
+    create_config_row(author_frame, 1, "AUTHOR_MAX_FOLLOWERS_RATIO", "AUTHOR_MAX_FOLLOWERS_RATIO",
+                      "← Skip an author whose followers exceed their following by this many times")
 
     # ─── SEMANTIC RANKING ───
     semantic_frame = ttk.LabelFrame(

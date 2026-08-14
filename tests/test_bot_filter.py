@@ -316,5 +316,52 @@ class BotVerdictTest(unittest.TestCase):
         )
 
 
+class AuthorVerdictTest(unittest.TestCase):
+    """The author follow-back check, which is stricter than the bot filter.
+
+    An author is followed for the follow-back they can give, so a ratio that
+    cannot be read rejects them - the opposite of the bot filter's fail-open.
+    """
+
+    def setUp(self):
+        self.saved = R.CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"]
+        R.CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"] = 5
+
+    def tearDown(self):
+        R.CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"] = self.saved
+
+    def reject(self, followers, following):
+        return R.author_rejection_reason(posts=None, followers=followers, following=following)
+
+    def test_a_balanced_profile_passes(self):
+        self.assertIsNone(self.reject(followers=800, following=450))
+
+    def test_exactly_at_the_ratio_passes(self):
+        self.assertIsNone(self.reject(followers=2500, following=500))
+
+    def test_too_many_followers_is_rejected(self):
+        """The influencer signal: far more followers than accounts followed."""
+        reason = self.reject(followers=5000, following=500)
+        self.assertIn("5000", reason)
+        self.assertIn("500", reason)
+
+    def test_following_nobody_is_rejected(self):
+        reason = self.reject(followers=100, following=0)
+        self.assertIn("nobody", reason)
+
+    def test_an_unreadable_count_rejects(self):
+        """Unlike the bot filter, a missing count must NOT let the author through:
+        without the ratio there is no evidence of a follow-back."""
+        self.assertIn("unreadable", self.reject(followers=None, following=450))
+        self.assertIn("unreadable", self.reject(followers=800, following=None))
+        self.assertIn("unreadable", self.reject(followers=None, following=None))
+
+    def test_threshold_is_a_setting(self):
+        R.CONFIG["AUTHOR_MAX_FOLLOWERS_RATIO"] = 1
+        self.assertIsNone(self.reject(followers=400, following=400))
+        reason = self.reject(followers=401, following=400)
+        self.assertIn("401", reason)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
