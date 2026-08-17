@@ -36,3 +36,9 @@ dist/
 # Node modules for the optional DOM test
 node_modules/
 package-lock.json
+
+# Local per-machine Claude Code settings
+.claude/settings.local.json
+
+# Safety copies of runtime state made before data edits
+*.bak
