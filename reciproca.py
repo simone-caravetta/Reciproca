@@ -124,6 +124,7 @@ HASHTAGS_FILE = data_path("hashtags.json")
 CONFIG_FILE = data_path("bot_config.json")
 UNFOLLOW_PROGRESS_FILE = data_path("unfollow_progress.json")
 UNFOLLOW_SESSION_FILE = data_path("unfollow_last_session.json")
+ACCOUNT_USERNAME_FILE = data_path("account_username.json")
 LOG_FILE = data_path("follow_bot.log")
 CHROME_PROFILE_DIR = data_path("chrome_profile")
 
@@ -229,6 +230,20 @@ def brief_error(exc):
     """
     text = str(exc).strip()
     return text.splitlines()[0] if text else type(exc).__name__
+
+
+def pause(seconds):
+    """Sleep in one-second slices so a stop request cuts the wait short.
+
+    The waits exist so Instagram never sees a machine. Once the user has asked
+    to stop, no more traffic comes from this run, so the wait has nothing left
+    to protect: the current operation still finishes, only the pause before the
+    next one is skipped. Short per-request waits inside an operation are not
+    pause() calls - they belong to the operation that must finish.
+    """
+    end = time.monotonic() + seconds
+    while not stop_requested.is_set() and time.monotonic() < end:
+        time.sleep(min(1.0, end - time.monotonic()))
 
 
 def has_marker(text, markers):
@@ -897,6 +912,8 @@ def add_to_queue(usernames):
 
     new_users = []
 
+    # The account the browser is logged into can slip into the queue from any
+    # extraction path, so the final funnel refuses it by name as well.
     for username in usernames:
         if me and username.lower() == me:
             logger.debug(f"Skipping own profile - never queued: {username}")
@@ -1555,6 +1572,10 @@ stop_requested = threading.Event()
 # that would otherwise have come after it.
 scoring_stop = threading.Event()
 active_threads = []
+# True once the browser holds a session cookie, i.e. the manual login went
+# through. Start Following stays disabled until then - a browser on the login
+# page cannot follow anyone.
+login_completed = False
 # Live extraction tracking
 live_extracted_users = []  # Track users as they're extracted
 live_frequencies = Counter()  # Track frequencies in real-time
@@ -1809,6 +1830,10 @@ def open_browser():
         driver.get("https://www.instagram.com/")
         log("✅ Browser opened! Please login manually.", 'success')
 
+        # If the saved profile has logged out, the login form is up and the user
+        # types the account name by hand - the one chance to learn it.
+        threading.Thread(target=watch_login_username, daemon=True).start()
+
         # The browser is the only place that knows which account is logged in, so
         # this is the first chance to tell whether the loaded export still matches.
         uf_check_account()
@@ -1828,6 +1853,139 @@ def open_browser():
     finally:
         browser_opening.clear()
         refresh_browser_state()
+
+
+# The login form's username input. Instagram has moved the field from
+# name="username" to name="email" (same box for username, email or phone); the
+# autocomplete attribute is the marker that has stayed put. Try them in order,
+# ending with the label's for->id link, which survives attribute renames.
+LOGIN_USERNAME_SELECTORS = (
+    "input[name='username']",
+    "input[autocomplete^='username']",
+    "input[name='email']",
+)
+LOGIN_USERNAME_XPATHS = (
+    # The login label ("Numero di cellulare, nome utente o indirizzo e-mail" or
+    # the English equivalent) points at the input through its for attribute.
+    "//input[@id=//label[contains(text(), 'utente') or contains(text(), 'username')"
+    " or contains(text(), 'cellulare') or contains(text(), 'phone')]/@for]",
+)
+
+
+def login_username_field():
+    """The login form's username input, or None when the login page is not up."""
+    if driver is None:
+        return None
+    for selector in LOGIN_USERNAME_SELECTORS:
+        try:
+            return driver.find_element(By.CSS_SELECTOR, selector)
+        except NoSuchElementException:
+            continue
+        except WebDriverException:
+            return None
+    for xpath in LOGIN_USERNAME_XPATHS:
+        try:
+            return driver.find_element(By.XPATH, xpath)
+        except NoSuchElementException:
+            continue
+        except WebDriverException:
+            return None
+    return None
+
+
+def read_login_username():
+    """Username typed into the login form, "" while it is still empty.
+
+    None means the login page is not up: the login went through, the user
+    navigated away, or the browser is gone.
+    """
+    field = login_username_field()
+    if field is None:
+        return None
+    try:
+        return (field.get_attribute("value") or "").strip()
+    except StaleElementReferenceException:
+        return ""
+
+
+def save_login_username(username):
+    """Remember which account logged into the browser."""
+    try:
+        with open(ACCOUNT_USERNAME_FILE, 'w', encoding='utf-8') as f:
+            json.dump({
+                "username": username,
+                "saved_at": datetime.now().isoformat(timespec='seconds'),
+            }, f, indent=2, ensure_ascii=False)
+        log(f"👤 Username captured from the login: {username}", 'success')
+        update_account_label()
+    except Exception as e:
+        logger.error(f"Error saving username: {e}")
+
+
+def load_account_username():
+    """The username saved from the last manual login, or None."""
+    try:
+        with open(ACCOUNT_USERNAME_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get("username")
+    except Exception:
+        return None
+
+
+def update_account_label():
+    """Show the last account that logged into the browser."""
+    username = load_account_username()
+    text = f"👤 Account: {username}" if username else "👤 Account: —"
+    try:
+        account_label.config(text=text)
+    except Exception as e:
+        logger.debug(f"update_account_label error: {e}")
+
+
+def watch_login_username():
+    """Save the username typed into Instagram's login page, whenever it appears.
+
+    The browser's saved profile is not always logged in: when it is not, the
+    login page comes up and the user logs in by hand, and nothing else in the
+    app can learn the account name. This thread reads the login form's username
+    field and saves the value as soon as the user has typed it.
+
+    It runs for as long as the browser is open, rather than stopping when no
+    login form is found: the page needs a moment to appear after the browser
+    opens, and a session can expire mid-run and show the login page again.
+
+    It steps aside while a session is driving the browser, like watch_browser.
+    """
+    global login_completed
+    last_username = None
+    login_form_noticed = False
+    while True:
+        if driver is None or not browser_is_open():
+            return
+        if session_running.is_set() or active_threads:
+            time.sleep(1)
+            continue
+        username = read_login_username()
+        if username is not None and not login_form_noticed:
+            login_form_noticed = True
+            log("👤 Login form detected - waiting for the username", 'info')
+        if username and username != last_username:
+            last_username = username
+            save_login_username(username)
+        # The session cookie only exists after a successful login, so it is the
+        # signal that Start Following can be let out. It also catches the case
+        # where the profile was already logged in when the browser opened.
+        # A stale cookie can outlive the session though - the profile keeps
+        # ds_user_id after Instagram stops accepting it - so the login form
+        # being up means logged out, cookie or not.
+        completed = username is None and current_account_id() is not None
+        if completed != login_completed:
+            login_completed = completed
+            if completed:
+                log("✅ Login detected - Start Following enabled", 'success')
+            update_follow_ui_state()
+            update_unfollow_ui_state()
+        time.sleep(1)
+
 
 # How often to check that the browser is still there, in milliseconds.
 BROWSER_WATCH_INTERVAL = 2000
@@ -1902,7 +2060,7 @@ def update_follow_ui_state():
         running = session_running.is_set()
         browser_btn.config(state='normal' if can_open_browser() else 'disabled')
         start_btn.config(
-            state='normal' if driver is not None and not running else 'disabled'
+            state='normal' if driver is not None and not running and login_completed else 'disabled'
         )
         stop_btn.config(state='normal' if running else 'disabled')
     except Exception as e:
@@ -1911,7 +2069,7 @@ def update_follow_ui_state():
 
 def handle_browser_closed():
     """Forget a browser that is gone and let the user open a new one."""
-    global driver
+    global driver, login_completed
 
     if driver is not None:
         try:
@@ -1919,6 +2077,7 @@ def handle_browser_closed():
         except Exception as e:
             logger.debug(f"Error quitting the closed browser: {e}")
         driver = None
+        login_completed = False
         log("🌐 Browser closed - click 'Open Browser' to start a new session", 'warning')
 
     update_follow_ui_state()
@@ -2894,12 +3053,13 @@ def extract_users_from_followers(current_hashtag="", author_num=0, total_authors
             # author's follower list once the author is followed back - it must
             # never become a candidate for itself.
             filtered_users = []
-            skipped_history = 0
             skipped_self = 0
+            skipped_history = 0
             me = own_username()
             for user in candidates:
                 if me and user.lower() == me:
                     skipped_self += 1
+                    log(f"⏭️ Skipped own account: {user}", 'info')
                     logger.debug(f"Filtered out own profile from extraction: {user}")
                 elif is_already_followed(user):
                     skipped_history += 1
@@ -3812,7 +3972,7 @@ def update_unfollow_ui_state():
         uf_browser_btn.config(state='normal' if can_open_browser() else 'disabled')
         uf_start_btn.config(
             state='normal'
-            if driver is not None and uf_non_followers and not running
+            if driver is not None and uf_non_followers and not running and login_completed
             else 'disabled'
         )
         uf_stop_btn.config(state='normal' if running else 'disabled')
@@ -3982,7 +4142,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                     if throttle_cooldown_count >= 2:
                         cooldown = random.uniform(8, 12)
                         log(f"🐢 Throttling detected ({throttle_cooldown_count} low counts), cooling down for {cooldown:.0f}s...", 'warning')
-                        time.sleep(cooldown)
+                        pause(cooldown)
                         throttle_cooldown_count = 0  # Reset after cooldown
                 else:
                     throttle_cooldown_count = 0  # Reset on good extraction
@@ -3999,10 +4159,10 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         if author_count % CONFIG["AUTHORS_BEFORE_COOLDOWN"] == 0:
             cooldown = CONFIG["COOLDOWN_DURATION"] + random.uniform(0, 5)
             log(f"🛡️ Safety cooldown: {cooldown:.0f}s after {author_count} authors...", 'info')
-            time.sleep(cooldown)
+            pause(cooldown)
 
         # Random delay between authors - safer range
-        time.sleep(random.uniform(4, 8))
+        pause(random.uniform(4, 8))
 
     total_hashtags = len(hashtags)
     for hashtag_idx, kw in enumerate(hashtags, 1):
@@ -4175,7 +4335,7 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
         if hashtag_idx < total_hashtags:
             break_time = CONFIG["HASHTAG_BREAK_DURATION"] + random.uniform(0, 10)
             log(f"☕ Safety break between hashtags: {break_time:.0f}s...", 'info')
-            time.sleep(break_time)
+            pause(break_time)
 
     # Which users to offer for the queue: this session's finds, best first. The
     # accumulated counter is for ranking the queue, not for deciding what to add,
@@ -4628,6 +4788,7 @@ def setup_gui():
     global uf_data_label, uf_delay_min_entry, uf_delay_max_entry, uf_limit_entry
     global uf_progress_bar, uf_status_label, uf_stats_label, uf_start_btn, uf_stop_btn
     global uf_browser_btn
+    global account_label
 
     root = tk.Tk()
     root.title("Reciproca - Follow & Unfollow")
@@ -4880,6 +5041,13 @@ def setup_gui():
     # Control buttons
     control_frame = ttk.Frame(main_tab)
     control_frame.pack(pady=20)
+
+    account_label = ttk.Label(
+        control_frame,
+        text='👤 Account: —',
+        font=('Helvetica', 10, 'bold')
+    )
+    account_label.pack(side='left', padx=5)
 
     browser_btn = ttk.Button(
         control_frame,
@@ -5390,6 +5558,7 @@ For development: Lower delays to test faster, increase cooldowns if getting bloc
     uf_auto_load_last_session()
     update_follow_ui_state()
     update_unfollow_ui_state()
+    update_account_label()
 
     # Start watching for the browser being closed behind the app's back
     root.after(BROWSER_WATCH_INTERVAL, watch_browser)

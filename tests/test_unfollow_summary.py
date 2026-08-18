@@ -25,6 +25,7 @@ class UnfollowSummaryTest(unittest.TestCase):
         R.UNFOLLOW_PROGRESS_FILE = os.path.join(tempfile.mkdtemp(), "unfollow_progress.json")
         R.uf_non_followers = [f"user{n}" for n in range(600)]
         R.uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+        R.login_completed = True  # a live browser means the manual login went through
 
     def save_progress(self, processed, unfollowed, skipped=()):
         with open(R.UNFOLLOW_PROGRESS_FILE, 'w', encoding='utf-8') as f:

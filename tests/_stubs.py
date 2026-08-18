@@ -36,7 +36,18 @@ _exceptions.WebDriverException = WebDriverException
 for _name in ("NoSuchElementException", "StaleElementReferenceException", "TimeoutException"):
     setattr(_exceptions, _name, type(_name, (WebDriverException,), {}))
 sys.modules["selenium.webdriver.chrome.service"].Service = object
-sys.modules["selenium.webdriver.common.by"].By = object
+
+
+class By:
+    """Selector constants, standing in for Selenium's By."""
+
+    CSS_SELECTOR = "css selector"
+    TAG_NAME = "tag name"
+    XPATH = "xpath"
+    NAME = "name"
+
+
+sys.modules["selenium.webdriver.common.by"].By = By
 sys.modules["selenium.webdriver.common.keys"].Keys = object
 sys.modules["selenium.webdriver.common.action_chains"].ActionChains = object
 sys.modules["selenium.webdriver.support"].expected_conditions = object
@@ -123,7 +134,9 @@ def install_fake_ui(module):
     module.uf_start_btn = FakeWidget()
     module.uf_stop_btn = FakeWidget()
     module.uf_data_label = FakeWidget()
+    module.account_label = FakeWidget()
     module.driver = None
+    module.login_completed = False
     module.browser_opening.clear()
     module.session_running.clear()
     module.stop_requested.clear()
