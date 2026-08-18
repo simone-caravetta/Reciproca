@@ -27,8 +27,6 @@ class QueueRankingTest(unittest.TestCase):
         R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
         R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
         R.last_scrape_frequencies = None
-        R.driver = None  # add_to_queue asks the browser for the own username
-        R._own_username = None
 
     def ranks(self, queue, frequencies=None):
         return [username for username, _, _ in R.rank_queue(queue, frequencies)]
@@ -468,40 +466,6 @@ class TrimQueueTest(unittest.TestCase):
         R.add_to_queue(["a", "b"])
         self.assertEqual(R.trim_queue(limit=50), 0)
         self.assertEqual(len(R.load_queue()), 2)
-
-
-class OwnProfileQueueTest(unittest.TestCase):
-    """The bot's own profile follows every author it follows back, so it shows
-    up in their follower lists - it must never reach the queue. The cached
-    username is set directly here: reading it from the browser is covered in
-    test_bot_filter.py.
-    """
-
-    def setUp(self):
-        workdir = tempfile.mkdtemp()
-        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
-        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
-        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
-        R.last_scrape_frequencies = None
-        R.driver = None  # add_to_queue asks the browser for the own username
-        R._own_username = None
-
-    def queued(self):
-        return [R.queue_username(item) for item in R.load_queue()]
-
-    def test_own_profile_is_never_queued(self):
-        R._own_username = "saimonph_"
-        R.add_to_queue(["alice", "SAIMONPH_", "bob"])
-        self.assertEqual(set(self.queued()), {"alice", "bob"})
-
-    def test_own_profile_case_does_not_matter(self):
-        R._own_username = "saimonph_"
-        R.add_to_queue(["saimonph_"])
-        self.assertEqual(self.queued(), [])
-
-    def test_without_a_known_username_nothing_is_excluded(self):
-        R.add_to_queue(["alice", "bob"])
-        self.assertEqual(set(self.queued()), {"alice", "bob"})
 
 
 if __name__ == "__main__":

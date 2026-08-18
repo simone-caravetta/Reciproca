@@ -611,23 +611,6 @@ return {
 };
 """
 
-# The logged-in account's username, read from the sidebar instead of a cookie:
-# ds_user_id carries only the numeric id, while the profile link's href carries
-# the name itself - no localized alt text to match, no page to navigate to.
-#
-# The sidebar holds one link per destination. Home is a bare "/" and the rest
-# are multi-segment ("/direct/inbox/"), so the profile link is the only one
-# whose href is a single bare username. The followers dialog adds no nav.
-OWN_PROFILE_JS = """
-const nav = document.querySelector('nav');
-if (!nav) return null;
-for (const link of nav.querySelectorAll('a[href^="/"]')) {
-    const match = (link.getAttribute('href') || '').match(/^\\/([^\\/]+)\\/?$/);
-    if (match) return match[1];
-}
-return null;
-"""
-
 # ---------------------------
 # CONFIG FILE MANAGEMENT
 # ---------------------------
@@ -908,15 +891,14 @@ def add_to_queue(usernames):
     # Add only new usernames (not already in queue and not already followed)
     existing_in_queue = {queue_username(item) for item in queue}
 
-    me = own_username()
-
     new_users = []
 
-    # The account the browser is logged into can slip into the queue from any
-    # extraction path, so the final funnel refuses it by name as well.
+    # The login account itself can slip into the queue from any extraction
+    # path, so the final funnel refuses it by name as well.
+    own_username = load_account_username()
     for username in usernames:
-        if me and username.lower() == me:
-            logger.debug(f"Skipping own profile - never queued: {username}")
+        if own_username and username.lower() == own_username.lower():
+            logger.debug(f"Skipping {username} - the login account itself")
         elif username not in existing_in_queue and not is_already_followed(username):
             new_users.append(username)
         elif is_already_followed(username):
@@ -1335,35 +1317,6 @@ def current_account_id():
     except WebDriverException as e:
         logger.info(f"Could not read the logged-in account: {type(e).__name__}")
         return None
-
-
-# Cached here rather than in CONFIG: the own account is whatever the browser is
-# logged into, which is not a setting - it changes when the profile does.
-_own_username = None
-
-
-def own_username():
-    """Username of the logged-in account, or None when it could not be read.
-
-    Read from the sidebar's profile link, so it follows the account the browser
-    is actually logged into - nothing to configure, and nothing to break when
-    the account changes. Only successful reads are cached, so a page that was
-    not ready yet is retried on the next call instead of remembered as 'no
-    account'. The cache is reset when a session begins.
-    """
-    global _own_username
-    if _own_username is not None:
-        return _own_username
-    if driver is None:
-        return None
-    try:
-        username = driver.execute_script(OWN_PROFILE_JS)
-        if username:
-            _own_username = str(username).lower()
-            logger.info(f"Own username detected: {_own_username}")
-    except WebDriverException as e:
-        logger.info(f"Could not read the logged-in username: {type(e).__name__}")
-    return _own_username
 
 
 def uf_progress_archive(account_id):
@@ -2034,10 +1987,6 @@ def begin_session():
 
     session_running.set()
     stop_requested.clear()
-    # The account may have changed since the last session; the next read has to
-    # come from the browser, not from whatever the previous session cached.
-    global _own_username
-    _own_username = None
     update_follow_ui_state()
     update_unfollow_ui_state()
     return True
@@ -3049,31 +2998,35 @@ def extract_users_from_followers(current_hashtag="", author_num=0, total_authors
 
             # Second, independent net: the bot's own history. Covers users
             # followed in an earlier session whose button Instagram has not
-            # refreshed yet. Third: the bot's own profile, which sits in every
-            # author's follower list once the author is followed back - it must
-            # never become a candidate for itself.
+            # refreshed yet.
             filtered_users = []
-            skipped_self = 0
+            skipped_own = 0
             skipped_history = 0
-            me = own_username()
+            # Third net, and the one that has to hold whatever the buttons say:
+            # the login account itself. Following an author puts our own row at
+            # the top of their followers list, and that row's button does not
+            # mark it as ours, so it is compared by name - the username
+            # captured from the login form - before anything is returned, so it
+            # never reaches the live extraction or the queue.
+            own_username = load_account_username()
             for user in candidates:
-                if me and user.lower() == me:
-                    skipped_self += 1
+                if own_username and user.lower() == own_username.lower():
+                    skipped_own += 1
                     log(f"⏭️ Skipped own account: {user}", 'info')
-                    logger.debug(f"Filtered out own profile from extraction: {user}")
+                    logger.debug(f"Filtered out the login account itself: {user}")
                 elif is_already_followed(user):
                     skipped_history += 1
                     logger.debug(f"Filtered out already followed user (history): {user}")
                 else:
                     filtered_users.append(user)
 
-            total_skipped = skipped_following + skipped_history + skipped_self
-            reasons = [f"{skipped_following} by button", f"{skipped_history} by history"]
-            if skipped_self:
-                reasons.append(f"{skipped_self} own profile")
+            why = f"{skipped_following} by button, {skipped_history} by history"
+            if skipped_own:
+                why += f", {skipped_own} own account"
             log(
                 f"📊 Extracted {len(filtered_users)} candidates "
-                f"({rows_inspected} rows, skipped {total_skipped}: {', '.join(reasons)})"
+                f"({rows_inspected} rows, skipped {skipped_following + skipped_history + skipped_own} "
+                f"already followed: {why})"
             )
 
             # If not a single row yielded a button, the row lookup is broken -
