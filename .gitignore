@@ -42,3 +42,4 @@ package-lock.json
 
 # Safety copies of runtime state made before data edits
 *.bak
+account_username.json

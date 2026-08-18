@@ -43,6 +43,7 @@ class BrowserStateTest(unittest.TestCase):
     def setUp(self):
         _stubs.install_fake_ui(R)
         R.uf_non_followers = []
+        R.login_completed = True  # a live browser means the manual login went through
 
     def assert_no_browser(self):
         self.assertEqual(R.browser_btn.state, 'normal', "Open Browser must be clickable")
@@ -140,6 +141,7 @@ class OneSessionAtATimeTest(unittest.TestCase):
     def setUp(self):
         _stubs.install_fake_ui(R)
         R.driver = LiveDriver()
+        R.login_completed = True  # a live browser means the manual login went through
         R.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
 
     def test_both_start_buttons_are_off_while_a_session_runs(self):

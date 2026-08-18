@@ -6,12 +6,25 @@ model, and this file is meant to run on the standard library alone.
 
     python3 tests/test_affinity.py
 """
+import importlib.util
 import os
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
 
 import reciproca as R  # noqa: E402
+
+
+def _semantic_model_present():
+    """True when this machine has the model, so 'absent' would not be the real state.
+
+    ModelAbsentTest checks the behaviour without the model; on a machine where
+    the packages and files are installed, that test would be testing a fiction.
+    """
+    for name in ("onnxruntime", "tokenizers", "numpy"):
+        if importlib.util.find_spec(name) is None:
+            return False
+    return R.model_is_downloaded()
 
 
 class CosineTest(unittest.TestCase):
@@ -254,6 +267,7 @@ class NormalizeTest(unittest.TestCase):
         self.assertIsNone(R.normalized(None))
 
 
+@unittest.skipIf(_semantic_model_present(), "the semantic model is installed on this machine")
 class ModelAbsentTest(unittest.TestCase):
     """Absent is a normal state. The packages are not installed here, which is the
     same position a user is in before the first download, so this is the real
