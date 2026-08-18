@@ -363,5 +363,67 @@ class AuthorVerdictTest(unittest.TestCase):
         self.assertIn("401", reason)
 
 
+class OwnUsernameTest(unittest.TestCase):
+    """The logged-in username comes from the browser, so it follows the account.
+
+    Only successful reads are cached: a page that was not ready yet is retried,
+    never remembered as 'no account'.
+    """
+
+    def setUp(self):
+        _stubs.install_fake_ui(R)
+        R._own_username = None
+
+    def test_reads_the_username_and_lowercases_it(self):
+        class Fake:
+            def execute_script(self, script, *args):
+                return "SaimonPh_"
+
+        R.driver = Fake()
+        self.assertEqual(R.own_username(), "saimonph_")
+
+    def test_successes_are_cached(self):
+        class Fake:
+            def __init__(self):
+                self.calls = 0
+
+            def execute_script(self, script, *args):
+                self.calls += 1
+                return "saimonph_"
+
+        fake = Fake()
+        R.driver = fake
+        self.assertEqual(R.own_username(), "saimonph_")
+        self.assertEqual(R.own_username(), "saimonph_")
+        self.assertEqual(fake.calls, 1)
+
+    def test_failures_are_retried_not_cached(self):
+        class Fake:
+            def __init__(self):
+                self.calls = 0
+
+            def execute_script(self, script, *args):
+                self.calls += 1
+                return None
+
+        fake = Fake()
+        R.driver = fake
+        self.assertIsNone(R.own_username())
+        self.assertIsNone(R.own_username())
+        self.assertEqual(fake.calls, 2)
+
+    def test_a_browser_that_will_not_answer(self):
+        class Broken:
+            def execute_script(self, script, *args):
+                raise _stubs.WebDriverException("gone")
+
+        R.driver = Broken()
+        self.assertIsNone(R.own_username())
+
+    def test_no_browser(self):
+        R.driver = None
+        self.assertIsNone(R.own_username())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
