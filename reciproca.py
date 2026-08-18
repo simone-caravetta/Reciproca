@@ -1469,6 +1469,24 @@ logging.basicConfig(
 )
 
 
+class _DropPoolFullWarning(logging.Filter):
+    """Drop urllib3's "Connection pool is full" noise.
+
+    Selenium keeps one keep-alive connection to chromedriver (pool size 1).
+    When two commands overlap - the browser watcher's probe against a
+    command, or two probes at once - the pool discards the busy connection
+    and opens a new one, which is harmless. The "Retrying" warnings, which
+    mean a real connection failure, stay.
+    """
+
+    def filter(self, record):
+        return "Connection pool is full" not in record.getMessage()
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_DropPoolFullWarning())
+
+
 # ---------------------------
 # SESSION STATS
 # ---------------------------
@@ -1859,6 +1877,10 @@ def read_login_username():
         return (field.get_attribute("value") or "").strip()
     except StaleElementReferenceException:
         return ""
+    except WebDriverException:
+        # The browser is not answering - treat it as not up and let the
+        # watcher keep polling rather than die on a transient failure.
+        return None
 
 
 def save_login_username(username):
