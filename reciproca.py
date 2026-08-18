@@ -893,8 +893,13 @@ def add_to_queue(usernames):
 
     new_users = []
 
+    # The login account itself can slip into the queue from any extraction
+    # path, so the final funnel refuses it by name as well.
+    own_username = load_account_username()
     for username in usernames:
-        if username not in existing_in_queue and not is_already_followed(username):
+        if own_username and username.lower() == own_username.lower():
+            logger.debug(f"Skipping {username} - the login account itself")
+        elif username not in existing_in_queue and not is_already_followed(username):
             new_users.append(username)
         elif is_already_followed(username):
             logger.debug(f"Skipping {username} - already in followed history")
@@ -2995,19 +3000,33 @@ def extract_users_from_followers(current_hashtag="", author_num=0, total_authors
             # followed in an earlier session whose button Instagram has not
             # refreshed yet.
             filtered_users = []
+            skipped_own = 0
             skipped_history = 0
+            # Third net, and the one that has to hold whatever the buttons say:
+            # the login account itself. Following an author puts our own row at
+            # the top of their followers list, and that row's button does not
+            # mark it as ours, so it is compared by name - the username
+            # captured from the login form - before anything is returned, so it
+            # never reaches the live extraction or the queue.
+            own_username = load_account_username()
             for user in candidates:
-                if is_already_followed(user):
+                if own_username and user.lower() == own_username.lower():
+                    skipped_own += 1
+                    log(f"⏭️ Skipped own account: {user}", 'info')
+                    logger.debug(f"Filtered out the login account itself: {user}")
+                elif is_already_followed(user):
                     skipped_history += 1
                     logger.debug(f"Filtered out already followed user (history): {user}")
                 else:
                     filtered_users.append(user)
 
-            total_skipped = skipped_following + skipped_history
+            why = f"{skipped_following} by button, {skipped_history} by history"
+            if skipped_own:
+                why += f", {skipped_own} own account"
             log(
                 f"📊 Extracted {len(filtered_users)} candidates "
-                f"({rows_inspected} rows, skipped {total_skipped} already followed: "
-                f"{skipped_following} by button, {skipped_history} by history)"
+                f"({rows_inspected} rows, skipped {skipped_following + skipped_history + skipped_own} "
+                f"already followed: {why})"
             )
 
             # If not a single row yielded a button, the row lookup is broken -
