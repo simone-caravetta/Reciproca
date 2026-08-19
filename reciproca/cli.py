@@ -36,6 +36,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 from reciproca import config, logging_sink, state
@@ -126,6 +127,9 @@ def cmd_browser_close(_args):
     if state.driver is None:
         print("No browser is open.")
         return 0
+    if state.session_running.is_set():
+        print("✗ A session is using the browser - `stop` it first.", file=sys.stderr)
+        return 1
     browser.handle_browser_closed()
     print("✅ Browser closed.")
     return 0
@@ -227,6 +231,16 @@ def ensure_browser(headless, login_timeout):
 # follow / unfollow
 # ---------------------------------------------------------------------------
 
+# Set by repl(): cycles run on a worker thread so the prompt stays responsive,
+# and `stop`/`status` keep working while a session runs. The one-shot CLI stays
+# synchronous - its exit code must mean the cycle finished.
+_interactive = False
+
+# The worker threads repl() spawned, so `quit` can ask their sessions to stop
+# before the browser is released.
+_repl_threads = []
+
+
 def cmd_follow(args):
     # In the interactive shell the browser may predate this command - leave it
     # for the next one. A one-shot CLI process always opened it just now, so it
@@ -237,20 +251,48 @@ def cmd_follow(args):
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
         return 1
-    try:
-        result = cycles.follow_cycle(
-            mode=args.mode,
-            delay_min=args.delay_min,
-            delay_max=args.delay_max,
-            limit=args.limit,
-            hashtags=args.hashtags,
-            after_search=args.after_search,
-        )
-        _print_result(result, args.json)
-        return 0 if result.get("ok") else 1
-    finally:
-        if not had_browser:
-            browser.handle_browser_closed()
+
+    if not _interactive:
+        # One-shot: the exit code must mean the cycle finished and its outcome.
+        try:
+            result = cycles.follow_cycle(
+                mode=args.mode,
+                delay_min=args.delay_min,
+                delay_max=args.delay_max,
+                limit=args.limit,
+                hashtags=args.hashtags,
+                after_search=args.after_search,
+            )
+            _print_result(result, args.json)
+            return 0 if result.get("ok") else 1
+        finally:
+            if not had_browser:
+                browser.handle_browser_closed()
+
+    # Interactive shell: the cycle runs on a worker thread so the prompt stays
+    # responsive - `status`, `stop` and every other command keep working.
+    def worker():
+        try:
+            result = cycles.follow_cycle(
+                mode=args.mode,
+                delay_min=args.delay_min,
+                delay_max=args.delay_max,
+                limit=args.limit,
+                hashtags=args.hashtags,
+                after_search=args.after_search,
+            )
+            _print_result(result, args.json)
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+        finally:
+            if not had_browser:
+                browser.handle_browser_closed()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    _repl_threads.append(thread)
+    print("🚀 Follow session started - `status` to watch, `stop` to halt.")
+    return 0
 
 
 def cmd_unfollow_load(args):
@@ -268,13 +310,31 @@ def cmd_unfollow_run(args):
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
         return 1
-    try:
-        result = cycles.unfollow_cycle(delay_min=args.delay_min, delay_max=args.delay_max, limit=args.limit)
-        _print_result(result, args.json)
-        return 0 if result.get("ok") else 1
-    finally:
-        if not had_browser:
-            browser.handle_browser_closed()
+
+    if not _interactive:
+        try:
+            result = cycles.unfollow_cycle(delay_min=args.delay_min, delay_max=args.delay_max, limit=args.limit)
+            _print_result(result, args.json)
+            return 0 if result.get("ok") else 1
+        finally:
+            if not had_browser:
+                browser.handle_browser_closed()
+
+    def worker():
+        try:
+            result = cycles.unfollow_cycle(delay_min=args.delay_min, delay_max=args.delay_max, limit=args.limit)
+            _print_result(result, args.json)
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+        finally:
+            if not had_browser:
+                browser.handle_browser_closed()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    _repl_threads.append(thread)
+    print("🚀 Unfollow session started - `status` to watch, `stop` to halt.")
+    return 0
 
 
 def cmd_unfollow_status(args):
@@ -571,12 +631,19 @@ def cmd_status(args):
         print(f"Hashtags: {', '.join('#' + t for t in status['hashtags']) or 'none'}")
         uf = status["unfollow"]
         print(f"Unfollow: {uf['non_followers']} loaded, {uf['remaining']} left, {uf['removed']} removed")
+        # While a session runs, the stats are that session's live progress.
         if "last_follow_stats" in status:
             s = status["last_follow_stats"]
-            print(f"Last follow session: {s['succeeded']}/{s['attempted']} followed, {s['errors']} errors")
+            if status["session_running"]:
+                print(f"Follow in progress: {s['succeeded']}/{s['attempted']} followed, {s['errors']} errors")
+            else:
+                print(f"Last follow session: {s['succeeded']}/{s['attempted']} followed, {s['errors']} errors")
         if "last_unfollow_stats" in status:
             s = status["last_unfollow_stats"]
-            print(f"Last unfollow session: {s['succeeded']}/{s['attempted']} unfollowed, {s['errors']} errors")
+            if status["session_running"]:
+                print(f"Unfollow in progress: {s['succeeded']}/{s['attempted']} unfollowed, {s['errors']} errors")
+            else:
+                print(f"Last unfollow session: {s['succeeded']}/{s['attempted']} unfollowed, {s['errors']} errors")
     return 0
 
 
@@ -754,6 +821,7 @@ def build_parser():
 
 REPL_BANNER = """Reciproca interactive shell - one process, the browser stays open
 between commands. `browser open` followed by `follow` drives the same Chrome.
+Sessions run in the background: `status` and `stop` work while they run.
 Same commands as the CLI; `help` lists them, `quit` (or Ctrl+D) exits."""
 
 
@@ -769,41 +837,58 @@ def repl(commands=None):
     `commands` is for tests and piped input (`echo "status\\nquit" |
     python -m reciproca`); when None, lines come from input().
     """
+    global _interactive
     print(REPL_BANNER)
     parser = build_parser()
-    if commands is not None:
-        lines = iter(commands)
-    else:
-        def _input_lines():
-            while True:
-                try:
-                    yield input("reciproca> ")
-                except (EOFError, KeyboardInterrupt):
-                    return
-        lines = _input_lines()
+    _interactive = True
+    try:
+        if commands is not None:
+            lines = iter(commands)
+        else:
+            def _input_lines():
+                while True:
+                    try:
+                        yield input("reciproca> ")
+                    except (EOFError, KeyboardInterrupt):
+                        return
+            lines = _input_lines()
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if line in ("quit", "exit"):
-            break
-        if line in ("help", "?"):
-            parser.print_help()
-            continue
-        try:
-            args = parser.parse_args(shlex.split(line))
-        except SystemExit:
-            continue  # argparse already printed the error
-        except Exception as e:
-            print(f"✗ {e}", file=sys.stderr)
-            continue
-        try:
-            args.handler(args)
-        except KeyboardInterrupt:
-            print("\nInterrupted.")
-        except Exception as e:
-            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("quit", "exit"):
+                break
+            if line in ("help", "?"):
+                parser.print_help()
+                continue
+            try:
+                args = parser.parse_args(shlex.split(line))
+            except SystemExit:
+                continue  # argparse already printed the error
+            except Exception as e:
+                print(f"✗ {e}", file=sys.stderr)
+                continue
+            try:
+                args.handler(args)
+            except KeyboardInterrupt:
+                print("\nInterrupted.")
+            except Exception as e:
+                print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+
+            # Workers are one session each; finished ones are pruned.
+            _repl_threads[:] = [t for t in _repl_threads if t.is_alive()]
+    finally:
+        _interactive = False
+
+    if any(t.is_alive() for t in _repl_threads):
+        print("A session is running - asking it to stop…")
+        state.stop_requested.set()
+        state.scoring_stop.set()
+        with open(config.STOP_FLAG_FILE, 'w', encoding='utf-8') as f:
+            f.write("stop\n")
+        for t in _repl_threads:
+            t.join(timeout=120)
 
     browser.handle_browser_closed()  # release the profile for other processes
     print("Bye.")
