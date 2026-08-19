@@ -240,6 +240,41 @@ _interactive = False
 # before the browser is released.
 _repl_threads = []
 
+# Mid-session question handshake. A worker thread that needs an answer from the
+# user - the after-search tri-state, mirroring the GUI's messagebox - sets
+# _question and waits; the main loop, which owns the terminal, renders it at
+# the next prompt and posts the answer. While a question is pending the prompt
+# IS the question, so typing `status` there is not possible - the cycle is
+# paused, exactly like the GUI's modal dialog blocks the session.
+_question = None
+_question_event = None
+_question_answer = None
+
+
+def _shell_decision(info):
+    """The decision_hook for shell sessions: ask at the prompt, like the GUI.
+
+    Called by the worker after the scrape; returns one of "follow" |
+    "save_stop" | "discard". A `stop` request while the question is open is
+    treated as "discard" - the user wants out.
+    """
+    global _question, _question_event, _question_answer
+    question = (
+        f"❓ Search finished: {info['ranked_count']} users found"
+        f" (best affinity {info['top_freq']:.2f}, {info['hashtag_count']} hashtags).\n"
+        "   [f]ollow now   [s]ave to queue and stop   [d]iscard? "
+    )
+    _question = question
+    _question_event = threading.Event()
+    _question_answer = None
+    try:
+        while not _question_event.wait(timeout=0.5):
+            if state.stop_requested.is_set() or os.path.exists(config.STOP_FLAG_FILE):
+                return "discard"
+        return _question_answer
+    finally:
+        _question = None
+
 
 def cmd_follow(args):
     # In the interactive shell the browser may predate this command - leave it
@@ -270,7 +305,8 @@ def cmd_follow(args):
                 browser.handle_browser_closed()
 
     # Interactive shell: the cycle runs on a worker thread so the prompt stays
-    # responsive - `status`, `stop` and every other command keep working.
+    # responsive - `status`, `stop` and every other command keep working. The
+    # after-search choice is asked at the prompt, mirroring the GUI's dialog.
     def worker():
         try:
             result = cycles.follow_cycle(
@@ -280,6 +316,7 @@ def cmd_follow(args):
                 limit=args.limit,
                 hashtags=args.hashtags,
                 after_search=args.after_search,
+                decision_hook=_shell_decision,
             )
             _print_result(result, args.json)
         except Exception as e:
@@ -837,7 +874,10 @@ def repl(commands=None):
     `commands` is for tests and piped input (`echo "status\\nquit" |
     python -m reciproca`); when None, lines come from input().
     """
-    global _interactive
+    # The question branch below assigns _question_answer; without the global
+    # declaration Python would shadow it with a local that dies at each line,
+    # and the waiting worker would read None instead of the answer.
+    global _interactive, _question, _question_event, _question_answer
     print(REPL_BANNER)
     parser = build_parser()
     _interactive = True
@@ -853,8 +893,37 @@ def repl(commands=None):
                         return
             lines = _input_lines()
 
-        for line in lines:
-            line = line.strip()
+        for raw in lines:
+            if _question is not None:
+                # A worker thread is waiting for an answer; this line is it.
+                # The GUI pauses the session on a modal messagebox; the shell
+                # pauses it on this question.
+                print("\n" + _question, end="", flush=True)
+                answer = raw.strip().lower()
+                if answer in ("f", "follow", "y", "yes"):
+                    _question_answer = "follow"
+                elif answer in ("s", "save", "save_stop"):
+                    _question_answer = "save_stop"
+                elif answer in ("d", "discard"):
+                    _question_answer = "discard"
+                elif answer in ("quit", "exit"):
+                    _question_answer = "discard"
+                    _question_event.set()
+                    break
+                else:
+                    print("   Answer with [f], [s] or [d].")
+                    continue
+                _question_event.set()
+                # The worker clears _question in its finally; wait for it, so a
+                # line that follows instantly (a piped script) is not mistaken
+                # for a second answer.
+                for _ in range(100):
+                    if _question is None:
+                        break
+                    time.sleep(0.05)
+                continue
+
+            line = raw.strip()
             if not line:
                 continue
             if line in ("quit", "exit"):
