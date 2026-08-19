@@ -8,7 +8,7 @@ CLI is only the terminal; the core does not know which one is calling.
 Command tree:
 
     browser open [--headless] | close | status
-    login wait [--timeout N]
+    login wait [--timeout N]   (opens the browser too, if it is not open)
     follow [--mode queue|search] [--hashtags a,b] [--delay-min M]
            [--delay-max M] [--limit N] [--after-search follow|save-stop|discard]
            [--headless] [--login-timeout N]
@@ -26,11 +26,30 @@ Command tree:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
 from reciproca import config, logging_sink, state
 from reciproca import browser, queue as queue_mod, unfollow, persistence, cycles, semantic, follow
+
+
+def _chrome_window_on_profile():
+    """True when a Chrome window is running on the app's profile.
+
+    A browser opened by an earlier CLI process survives that process, but the
+    driver - and with it the login flag - dies with it, so a fresh process
+    cannot attach. The status commands report the leftover window separately
+    from the driver, instead of pretending everything is off.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", f"user-data-dir={config.CHROME_PROFILE_DIR}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return False
 
 
 def _confirm(args, what):
@@ -79,9 +98,17 @@ def cmd_browser_open(args):
     browser.open_browser(headless=args.headless)
     if state.driver is None:
         print("Chrome did not open - see follow_bot.log.", file=sys.stderr)
+        print("If a Chrome window is still open from another command, close it and retry.", file=sys.stderr)
         return 1
+    # The login watcher reports asynchronously from its own thread; give it a
+    # few seconds to probe the cookie before saying whether the session is in.
+    for _ in range(20):
+        if state.login_completed:
+            break
+        time.sleep(0.5)
     if state.login_completed:
         print("✅ Browser open and logged in.")
+        print("   Chrome stays open for interactive use - close the window when done.")
     else:
         print("✅ Browser open. Log in (or confirm the session), then `login wait`.")
     return 0
@@ -103,16 +130,37 @@ def cmd_browser_status(args):
         "session_running": state.session_running.is_set(),
         "rate_limited": browser.check_rate_limit(state.driver) if state.driver is not None else False,
     }
+    status["browser_window_open"] = state.driver is None and _chrome_window_on_profile()
     if args.json:
         print(json.dumps(status, indent=2, ensure_ascii=False))
     else:
-        for key, label in (("browser_open", "Browser open"), ("logged_in", "Logged in"),
-                           ("session_running", "Session running"), ("rate_limited", "Rate limited")):
-            print(f"{label}: {'yes' if status[key] else 'no'}")
+        if status["browser_open"]:
+            print(f"Browser open: yes")
+        elif status["browser_window_open"]:
+            print("Browser open: a Chrome window is running, but no CLI process controls it")
+            print("               (close the window to release the profile)")
+        else:
+            print("Browser open: no")
+        print(f"Logged in: {'yes' if status['logged_in'] else 'no'}")
+        print(f"Session running: {'yes' if status['session_running'] else 'no'}")
+        print(f"Rate limited: {'yes' if status['rate_limited'] else 'no'}")
     return 0
 
 
 def cmd_login_wait(args):
+    if state.driver is None:
+        # A fresh process has no driver and cannot see a browser an earlier
+        # command opened - the login flag dies with the process that set it.
+        # Open the browser here and wait for the login in this same process.
+        ok, error = ensure_browser(False, args.timeout)
+        if not ok:
+            print(f"✗ {error}", file=sys.stderr)
+            return 1
+        # A setup command: the login is saved in chrome_profile/, so the
+        # browser can go. The next command re-opens and re-detects it.
+        browser.handle_browser_closed()
+        print("✅ Logged in.")
+        return 0
     if not wait_for_login(args.timeout):
         print(
             "Login did not complete. Open a visible browser and log in to Instagram:\n"
@@ -150,7 +198,10 @@ def ensure_browser(headless, login_timeout):
         print("Opening headless Chrome - this only works with a login already saved in chrome_profile/.")
     browser.open_browser(headless=headless)
     if state.driver is None:
-        return False, "Chrome did not open - see follow_bot.log."
+        return False, (
+            "Chrome did not open - see follow_bot.log.\n"
+            "If a Chrome window is still open from another command, close it and retry."
+        )
     if state.login_completed:
         return True, None
     if headless:
@@ -173,16 +224,22 @@ def cmd_follow(args):
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
         return 1
-    result = cycles.follow_cycle(
-        mode=args.mode,
-        delay_min=args.delay_min,
-        delay_max=args.delay_max,
-        limit=args.limit,
-        hashtags=args.hashtags,
-        after_search=args.after_search,
-    )
-    _print_result(result, args.json)
-    return 0 if result.get("ok") else 1
+    try:
+        result = cycles.follow_cycle(
+            mode=args.mode,
+            delay_min=args.delay_min,
+            delay_max=args.delay_max,
+            limit=args.limit,
+            hashtags=args.hashtags,
+            after_search=args.after_search,
+        )
+        _print_result(result, args.json)
+        return 0 if result.get("ok") else 1
+    finally:
+        # This process opened the browser, so it releases it: the CLI's model
+        # is open -> run -> quit, and a Chrome left behind would hold the
+        # profile hostage for the next command.
+        browser.handle_browser_closed()
 
 
 def cmd_unfollow_load(args):
@@ -199,9 +256,12 @@ def cmd_unfollow_run(args):
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
         return 1
-    result = cycles.unfollow_cycle(delay_min=args.delay_min, delay_max=args.delay_max, limit=args.limit)
-    _print_result(result, args.json)
-    return 0 if result.get("ok") else 1
+    try:
+        result = cycles.unfollow_cycle(delay_min=args.delay_min, delay_max=args.delay_max, limit=args.limit)
+        _print_result(result, args.json)
+        return 0 if result.get("ok") else 1
+    finally:
+        browser.handle_browser_closed()
 
 
 def cmd_unfollow_status(args):
@@ -470,6 +530,7 @@ def cmd_status(args):
             "removed": unfollow.unfollow_progress_counts()[2],
         },
     }
+    status["browser_window_open"] = state.driver is None and _chrome_window_on_profile()
     if state.stats.attempted:
         status["last_follow_stats"] = {
             "attempted": state.stats.attempted,
@@ -485,8 +546,13 @@ def cmd_status(args):
     if args.json:
         print(json.dumps(status, indent=2, ensure_ascii=False))
     else:
-        print(f"Browser: {'open' if status['browser_open'] else 'closed'}"
-              f" - {'logged in' if status['logged_in'] else 'not logged in'}")
+        if status["browser_open"]:
+            browser_line = f"Browser: open - {'logged in' if status['logged_in'] else 'not logged in'}"
+        elif status["browser_window_open"]:
+            browser_line = "Browser: a Chrome window is running, but no CLI process controls it"
+        else:
+            browser_line = "Browser: closed"
+        print(browser_line)
         print(f"Session running: {'yes' if status['session_running'] else 'no'}")
         print(f"Queue: {status['queue']} users")
         print(f"Hashtags: {', '.join('#' + t for t in status['hashtags']) or 'none'}")

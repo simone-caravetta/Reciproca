@@ -21,6 +21,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from reciproca import config, hooks, state
 from reciproca.logging_sink import log, logger
+from reciproca.utils import brief_error
 from reciproca.markers import RATE_LIMIT_MARKERS
 from reciproca.persistence import (
     current_account_id,
@@ -138,11 +139,11 @@ def open_browser(headless=False):
         # with no indication of why. Record the full traceback in follow_bot.log,
         # which sits next to the executable, and surface the error in the GUI.
         logger.exception("Failed to open browser")
-        log(f"❌ Browser error: {type(e).__name__}: {e}", 'error')
+        log(f"❌ Browser error: {brief_error(e)}", 'error')
         log("   Full traceback written to follow_bot.log", 'error')
         hooks.notify_user(
             "Browser Error",
-            f"{type(e).__name__}: {e}\n\nSee follow_bot.log next to the app for details.",
+            f"{brief_error(e)}\n\nSee follow_bot.log next to the app for details.",
             'error',
         )
     finally:

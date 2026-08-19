@@ -10,6 +10,7 @@ Import-time side effects (as in the monolith): logging.basicConfig to
 follow_bot.log + stderr, and the urllib3 pool-noise filter.
 """
 
+import copy
 import logging
 import time
 from collections import deque
@@ -17,13 +18,28 @@ from datetime import datetime
 
 from reciproca import config
 
+class _ConsoleHandler(logging.StreamHandler):
+    """Terminal-friendly handler: one line per record, no tracebacks.
+
+    The log file keeps the full exception text; the console only gets the
+    one-line summary, so a CLI user is not buried under a Selenium stacktrace
+    when a browser fails to open.
+    """
+
+    def format(self, record):
+        rec = copy.copy(record)
+        rec.exc_info = None
+        rec.exc_text = None
+        return super().format(rec)
+
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(config.LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
+        _ConsoleHandler()
     ]
 )
 
