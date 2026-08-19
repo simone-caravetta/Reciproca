@@ -5,6 +5,13 @@ started from one and continued from the other - the browser, the queue, the
 config and the progress files are all shared. The GUI is only the window; the
 CLI is only the terminal; the core does not know which one is calling.
 
+Two modes. With arguments, each invocation is one command in its own process,
+which owns the browser for that command and releases it afterwards. With no
+arguments it enters the interactive shell: one long-lived process where the
+browser survives across commands, so `browser open` followed by `follow`
+drives the same Chrome. Piped stdin (`echo "status\\nquit" | python -m
+reciproca`) runs the same shell as a script.
+
 Command tree:
 
     browser open [--headless] | close | status
@@ -26,6 +33,7 @@ Command tree:
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -220,6 +228,11 @@ def ensure_browser(headless, login_timeout):
 # ---------------------------------------------------------------------------
 
 def cmd_follow(args):
+    # In the interactive shell the browser may predate this command - leave it
+    # for the next one. A one-shot CLI process always opened it just now, so it
+    # releases it: open -> run -> quit, or a Chrome left behind holds the
+    # profile hostage for the next command.
+    had_browser = state.driver is not None
     ok, error = ensure_browser(args.headless, args.login_timeout)
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
@@ -236,10 +249,8 @@ def cmd_follow(args):
         _print_result(result, args.json)
         return 0 if result.get("ok") else 1
     finally:
-        # This process opened the browser, so it releases it: the CLI's model
-        # is open -> run -> quit, and a Chrome left behind would hold the
-        # profile hostage for the next command.
-        browser.handle_browser_closed()
+        if not had_browser:
+            browser.handle_browser_closed()
 
 
 def cmd_unfollow_load(args):
@@ -252,6 +263,7 @@ def cmd_unfollow_load(args):
 
 
 def cmd_unfollow_run(args):
+    had_browser = state.driver is not None
     ok, error = ensure_browser(args.headless, args.login_timeout)
     if not ok:
         print(f"✗ {error}", file=sys.stderr)
@@ -261,7 +273,8 @@ def cmd_unfollow_run(args):
         _print_result(result, args.json)
         return 0 if result.get("ok") else 1
     finally:
-        browser.handle_browser_closed()
+        if not had_browser:
+            browser.handle_browser_closed()
 
 
 def cmd_unfollow_status(args):
@@ -739,7 +752,72 @@ def build_parser():
     return parser
 
 
+REPL_BANNER = """Reciproca interactive shell - one process, the browser stays open
+between commands. `browser open` followed by `follow` drives the same Chrome.
+Same commands as the CLI; `help` lists them, `quit` (or Ctrl+D) exits."""
+
+
+def repl(commands=None):
+    """Interactive shell over the same command tree.
+
+    The one-shot CLI dies after every command, taking the driver - and with it
+    the login flag - along. Here the process stays alive, so a browser opened
+    by one command is still there for the next: the flow that is impossible
+    across separate processes. `quit` closes the browser and returns to the
+    shell.
+
+    `commands` is for tests and piped input (`echo "status\\nquit" |
+    python -m reciproca`); when None, lines come from input().
+    """
+    print(REPL_BANNER)
+    parser = build_parser()
+    if commands is not None:
+        lines = iter(commands)
+    else:
+        def _input_lines():
+            while True:
+                try:
+                    yield input("reciproca> ")
+                except (EOFError, KeyboardInterrupt):
+                    return
+        lines = _input_lines()
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("quit", "exit"):
+            break
+        if line in ("help", "?"):
+            parser.print_help()
+            continue
+        try:
+            args = parser.parse_args(shlex.split(line))
+        except SystemExit:
+            continue  # argparse already printed the error
+        except Exception as e:
+            print(f"✗ {e}", file=sys.stderr)
+            continue
+        try:
+            args.handler(args)
+        except KeyboardInterrupt:
+            print("\nInterrupted.")
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+
+    browser.handle_browser_closed()  # release the profile for other processes
+    print("Bye.")
+    return 0
+
+
 def main(argv=None):
+    if argv is None:
+        # No arguments: an interactive shell when on a terminal, a scripted
+        # session when stdin is a pipe. Either way one process owns the
+        # browser for the whole session.
+        if sys.stdin.isatty():
+            return repl()
+        return repl(commands=iter(sys.stdin))
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
