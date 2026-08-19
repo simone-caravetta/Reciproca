@@ -1,8 +1,9 @@
-"""Makes reciproca.py importable without a browser or a display.
+"""Makes the reciproca package importable without a browser or a display.
 
-reciproca.py pulls in Selenium and Tkinter at import time for the GUI and the
-browser. The logic under test touches neither, so they are stubbed rather than
-installed - a test run must never be able to open a real browser.
+The package pulls in Selenium (through the browser/scraping modules) and
+Tkinter (through gui.py) at import time. The logic under test touches neither,
+so they are stubbed rather than installed - a test run must never be able to
+open a real browser.
 
 Importing this module is what installs the stubs, so it has to come before
 `import reciproca`.
@@ -105,6 +106,12 @@ class FakeWidget:
     def delete(self, *args, **kwargs):
         pass
 
+    def get(self, *args, **kwargs):
+        return []
+
+    def curselection(self):
+        return []
+
 
 class FakeRoot:
     """Tk root stand-in: remembers scheduled callbacks instead of running them."""
@@ -119,27 +126,50 @@ class FakeRoot:
         pass
 
 
-def install_fake_ui(module):
-    """Point the module's widget globals at fakes and clear the browser state.
+def install_fake_ui():
+    """Point the GUI module's widget globals at fakes and reset the runtime state.
 
-    Central on purpose: a widget added to reciproca.py needs adding here once,
-    rather than in every test that drives the state functions.
+    Central on purpose: a widget added to reciproca/gui.py needs adding here
+    once, rather than in every test that drives the state functions.
+
+    Also attaches the fake-laden GUI module to the core's hooks, so a call like
+    R.update_follow_ui_state() runs the real logic against the fake widgets -
+    the same path the monolith's tests exercised.
     """
-    module.root = FakeRoot()
-    module.log_box = FakeWidget()
-    module.browser_btn = FakeWidget()
-    module.start_btn = FakeWidget()
-    module.stop_btn = FakeWidget()
-    module.uf_browser_btn = FakeWidget()
-    module.uf_start_btn = FakeWidget()
-    module.uf_stop_btn = FakeWidget()
-    module.uf_data_label = FakeWidget()
-    module.account_label = FakeWidget()
-    module.driver = None
-    module.login_completed = False
-    module.browser_opening.clear()
-    module.session_running.clear()
-    module.stop_requested.clear()
-    module.active_threads[:] = []
+    import reciproca as R  # noqa: E402  (the stubs above made this safe)
+
+    gui = R.gui
+    gui.root = FakeRoot()
+    gui.log_box = FakeWidget()
+    gui.progress_bar = FakeWidget()
+    gui.status_label = FakeWidget()
+    gui.stats_label = FakeWidget()
+    gui.uf_progress_bar = FakeWidget()
+    gui.uf_status_label = FakeWidget()
+    gui.uf_stats_label = FakeWidget()
+    gui.browser_btn = FakeWidget()
+    gui.start_btn = FakeWidget()
+    gui.stop_btn = FakeWidget()
+    gui.uf_browser_btn = FakeWidget()
+    gui.uf_start_btn = FakeWidget()
+    gui.uf_stop_btn = FakeWidget()
+    gui.uf_data_label = FakeWidget()
+    gui.account_label = FakeWidget()
+    gui.queue_listbox = FakeWidget()
+    gui.queue_count_label = FakeWidget()
+    gui.main_queue_info = FakeWidget()
+    gui.live_extraction_listbox = FakeWidget()
+    gui.live_extraction_label = FakeWidget()
+
+    state = R.state
+    state.driver = None
+    state.login_completed = False
+    state.browser_opening.clear()
+    state.session_running.clear()
+    state.stop_requested.clear()
+    state.scoring_stop.clear()
+    state.active_threads[:] = []
+
+    R.hooks.attach(gui)
     messagebox.shown.clear()
     messagebox.answer = True

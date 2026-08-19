@@ -111,10 +111,10 @@ class NoLoginPageDriver:
 
 class LoginCaptureTest(unittest.TestCase):
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         self.tmpdir = tempfile.TemporaryDirectory()
-        R.ACCOUNT_USERNAME_FILE = os.path.join(self.tmpdir.name, "account_username.json")
-        R.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
+        R.config.ACCOUNT_USERNAME_FILE = os.path.join(self.tmpdir.name, "account_username.json")
+        R.state.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -122,7 +122,7 @@ class LoginCaptureTest(unittest.TestCase):
     def test_username_is_saved_and_loadable(self):
         R.save_login_username("mario.rossi")
 
-        with open(R.ACCOUNT_USERNAME_FILE, encoding='utf-8') as f:
+        with open(R.config.ACCOUNT_USERNAME_FILE, encoding='utf-8') as f:
             data = json.load(f)
         self.assertEqual(data["username"], "mario.rossi")
         self.assertIn("saved_at", data)
@@ -133,22 +133,22 @@ class LoginCaptureTest(unittest.TestCase):
 
     def test_saving_updates_the_account_label(self):
         R.update_account_label()
-        self.assertEqual(R.account_label.settings['text'], '👤 Account: —')
+        self.assertEqual(R.gui.account_label.settings['text'], '👤 Account: —')
 
         R.save_login_username("mario.rossi")
-        self.assertEqual(R.account_label.settings['text'], '👤 Account: mario.rossi')
+        self.assertEqual(R.gui.account_label.settings['text'], '👤 Account: mario.rossi')
 
     def test_reading_the_login_field(self):
-        R.driver = LoginPageDriver(username="mario.rossi")
+        R.state.driver = LoginPageDriver(username="mario.rossi")
         self.assertEqual(R.read_login_username(), "mario.rossi")
 
     def test_it_finds_the_field_with_instagram_current_markup(self):
         """The real field has name="email" and autocomplete="username webauthn"."""
-        R.driver = LoginPageDriver(username="mario.rossi")
+        R.state.driver = LoginPageDriver(username="mario.rossi")
         self.assertEqual(R.read_login_username(), "mario.rossi")
 
     def test_it_still_finds_the_older_markup_with_name_username(self):
-        R.driver = LoginPageDriver(
+        R.state.driver = LoginPageDriver(
             username="mario.rossi",
             attrs={"name": "username", "autocomplete": "username", "type": "text"},
         )
@@ -156,7 +156,7 @@ class LoginCaptureTest(unittest.TestCase):
 
     def test_it_ignores_a_field_that_is_not_a_login_username(self):
         """A page can contain other text inputs - they must not be captured."""
-        R.driver = LoginPageDriver(
+        R.state.driver = LoginPageDriver(
             username="mario.rossi",
             attrs={"name": "search", "autocomplete": "off", "type": "text"},
         )
@@ -165,7 +165,7 @@ class LoginCaptureTest(unittest.TestCase):
     def test_it_falls_back_to_the_label_for_link_when_attributes_are_renamed(self):
         """If Instagram renames name/autocomplete, the label still points at the
         input through its for attribute, and the XPath fallback finds it."""
-        R.driver = LoginPageDriver(
+        R.state.driver = LoginPageDriver(
             username="mario.rossi",
             attrs={"id": "_R_32d9lplcldcpbn6b5ipamH1_", "type": "text"},
             label_for="_R_32d9lplcldcpbn6b5ipamH1_",
@@ -173,18 +173,18 @@ class LoginCaptureTest(unittest.TestCase):
         self.assertEqual(R.read_login_username(), "mario.rossi")
 
     def test_empty_field_is_not_the_form_gone(self):
-        R.driver = LoginPageDriver(username="")
+        R.state.driver = LoginPageDriver(username="")
         self.assertEqual(R.read_login_username(), "")
 
     def test_no_login_page_reads_as_none(self):
-        R.driver = NoLoginPageDriver()
+        R.state.driver = NoLoginPageDriver()
         self.assertIsNone(R.read_login_username())
 
     def test_watch_saves_the_username_as_soon_as_it_is_typed(self):
-        R.driver = LoginPageDriver(username="mario.rossi", form_goes_away_after=2)
+        R.state.driver = LoginPageDriver(username="mario.rossi", form_goes_away_after=2)
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(2, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
@@ -196,23 +196,23 @@ class LoginCaptureTest(unittest.TestCase):
 
     def test_start_stays_disabled_while_the_login_form_is_up(self):
         """A browser sitting on the login page cannot follow anyone."""
-        R.driver = LoginPageDriver(username="mario.rossi")  # no session cookie yet
+        R.state.driver = LoginPageDriver(username="mario.rossi")  # no session cookie yet
         R.update_follow_ui_state()
         R.update_unfollow_ui_state()
-        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
 
         # The watcher must not flip the button while the cookie is missing.
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(1, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
         thread.start()
         thread.join(10)
 
-        self.assertFalse(R.login_completed)
-        self.assertEqual(R.start_btn.state, 'disabled')
-        self.assertEqual(R.uf_start_btn.state, 'disabled', "unfollow waits for the login too")
+        self.assertFalse(R.state.login_completed)
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.uf_start_btn.state, 'disabled', "unfollow waits for the login too")
 
     def test_start_enables_only_after_the_login_goes_through(self):
         """The session cookie appears only after a successful login - Start
@@ -236,21 +236,21 @@ class LoginCaptureTest(unittest.TestCase):
                     return {'value': '59859152535'}
                 return None
 
-        R.driver = LoggingInDriver()
+        R.state.driver = LoggingInDriver()
         R.update_follow_ui_state()
-        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(3, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
         thread.start()
         thread.join(10)
 
-        self.assertTrue(R.login_completed)
-        self.assertEqual(R.start_btn.state, 'normal')
-        self.assertEqual(R.uf_start_btn.state, 'normal', "unfollow enables with the login too")
+        self.assertTrue(R.state.login_completed)
+        self.assertEqual(R.gui.start_btn.state, 'normal')
+        self.assertEqual(R.gui.uf_start_btn.state, 'normal', "unfollow enables with the login too")
         self.assertEqual(R.load_account_username(), "mario.rossi")
 
     def test_a_stale_session_cookie_does_not_enable_start(self):
@@ -273,22 +273,22 @@ class LoginCaptureTest(unittest.TestCase):
                     return {'value': '59859152535'}
                 return None
 
-        R.driver = StaleCookieDriver()
+        R.state.driver = StaleCookieDriver()
         R.update_follow_ui_state()
         R.update_unfollow_ui_state()
-        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(1, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
         thread.start()
         thread.join(10)
 
-        self.assertFalse(R.login_completed)
-        self.assertEqual(R.start_btn.state, 'disabled')
-        self.assertEqual(R.uf_start_btn.state, 'disabled', "unfollow waits for the login too")
+        self.assertFalse(R.state.login_completed)
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.uf_start_btn.state, 'disabled', "unfollow waits for the login too")
 
     def test_start_enables_when_the_form_goes_away_even_with_a_stale_cookie(self):
         """The cookie was already there from an old session - what matters is
@@ -309,28 +309,28 @@ class LoginCaptureTest(unittest.TestCase):
                     return {'value': '59859152535'}
                 return None
 
-        R.driver = StaleCookieLoggingInDriver()
+        R.state.driver = StaleCookieLoggingInDriver()
         R.update_follow_ui_state()
-        self.assertEqual(R.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(3, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
         thread.start()
         thread.join(10)
 
-        self.assertTrue(R.login_completed)
-        self.assertEqual(R.start_btn.state, 'normal')
-        self.assertEqual(R.uf_start_btn.state, 'normal', "unfollow enables with the login too")
+        self.assertTrue(R.state.login_completed)
+        self.assertEqual(R.gui.start_btn.state, 'normal')
+        self.assertEqual(R.gui.uf_start_btn.state, 'normal', "unfollow enables with the login too")
         self.assertEqual(R.load_account_username(), "mario.rossi")
 
     def test_watch_saves_nothing_when_already_logged_in(self):
-        R.driver = NoLoginPageDriver()
+        R.state.driver = NoLoginPageDriver()
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(0.5, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
@@ -341,10 +341,10 @@ class LoginCaptureTest(unittest.TestCase):
         self.assertIsNone(R.load_account_username(), "nothing was typed, nothing is saved")
 
     def test_watch_stops_when_the_browser_closes(self):
-        R.driver = LoginPageDriver(username="mario.rossi")
+        R.state.driver = LoginPageDriver(username="mario.rossi")
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(0.5, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)
@@ -371,11 +371,11 @@ class LoginCaptureTest(unittest.TestCase):
                 return None
 
         driver = EditableDriver()
-        R.driver = driver
-        R.ACCOUNT_USERNAME_FILE = os.path.join(self.tmpdir.name, "account_username.json")
+        R.state.driver = driver
+        R.config.ACCOUNT_USERNAME_FILE = os.path.join(self.tmpdir.name, "account_username.json")
 
         def close_the_browser():
-            R.driver = None
+            R.state.driver = None
 
         threading.Timer(3, close_the_browser).start()
         thread = threading.Thread(target=R.watch_login_username, daemon=True)

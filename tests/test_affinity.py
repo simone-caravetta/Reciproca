@@ -274,7 +274,7 @@ class ModelAbsentTest(unittest.TestCase):
     behaviour rather than a simulation of it."""
 
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         self.model = R.SemanticModel()
 
     def test_it_says_it_is_not_available(self):
@@ -307,7 +307,7 @@ class NicheSettingTest(unittest.TestCase):
 
     def setUp(self):
         import tempfile
-        R.CONFIG_FILE = os.path.join(tempfile.mkdtemp(), "bot_config.json")
+        R.config.CONFIG_FILE = os.path.join(tempfile.mkdtemp(), "bot_config.json")
 
     def test_a_sentence_survives_a_save_and_a_load(self):
         niche = "fotografi che scattano su pellicola e mostrano il loro lavoro"

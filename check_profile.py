@@ -12,46 +12,14 @@ Close Reciproca first: Chrome will not open the same profile directory twice.
 import sys
 import time
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-
 import reciproca as R
 
 
-class Console:
-    """Stands in for the GUI log box, so warnings land on the terminal instead."""
-
-    def insert(self, _end, message, _tag=None):
-        print(message, end="")
-
-    def see(self, *_args):
-        pass
-
-
-class NoWindow:
-    def update_idletasks(self):
-        pass
-
-
-def open_chrome():
-    """The same browser the app opens, on the same profile, so the same login."""
-    options = webdriver.ChromeOptions()
-    options.add_argument(f"--user-data-dir={R.CHROME_PROFILE_DIR}")
-    options.add_argument("--profile-directory=Default")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=options
-    )
-
-
 def report(username):
-    R.driver.get(f"https://www.instagram.com/{username}/")
+    R.state.driver.get(f"https://www.instagram.com/{username}/")
     time.sleep(4)
 
-    raw = R.driver.execute_script(R.PROFILE_STATS_JS)
+    raw = R.state.driver.execute_script(R.PROFILE_STATS_JS)
     if not raw:
         print("No header on the page: either not logged in, or it did not load.")
         return
@@ -95,12 +63,11 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(f"usage: python {sys.argv[0]} <username>")
 
-    # log() writes to the GUI, which is not running here.
-    R.log_box = Console()
-    R.root = NoWindow()
-
-    R.driver = open_chrome()
+    # log() goes to the log file and the terminal now; no GUI is running here.
+    R.open_browser()
+    if R.state.driver is None:
+        sys.exit("Chrome did not open - see the log above.")
     try:
         report(sys.argv[1].strip().strip("/").split("/")[-1])
     finally:
-        R.driver.quit()
+        R.handle_browser_closed()

@@ -5,7 +5,7 @@ one for its likes and its own permalink, all of which contain "/p/" without bein
 tiles. Collecting those queued up addresses that stop existing the moment the post
 closes, which filled the log with "no such element" and wasted a pass over the grid.
 
-The pattern is read out of POST_LINKS_JS in reciproca.py, so this cannot drift from
+The pattern is read out of POST_LINKS_JS in reciproca/selectors.py, so this cannot drift from
 the shipped code.
 
     python3 tests/test_post_links.py
@@ -125,7 +125,7 @@ class LeaveExtraWindowTest(unittest.TestCase):
     """
 
     def leave(self, driver):
-        R.driver = driver
+        R.state.driver = driver
         R.leave_extra_window("grid")
         return driver
 

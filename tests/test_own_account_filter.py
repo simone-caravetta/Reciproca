@@ -53,26 +53,26 @@ class FollowersPopupFilterTest(unittest.TestCase):
     """The check at the popup stage, before anything reaches the live list."""
 
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         self.workdir = tempfile.mkdtemp()
-        R.FOLLOWED_FILE = os.path.join(self.workdir, "followed_history.json")
-        R.stop_requested.set()  # skip the scroll loop, keep the popup read
+        R.config.FOLLOWED_FILE = os.path.join(self.workdir, "followed_history.json")
+        R.state.stop_requested.set()  # skip the scroll loop, keep the popup read
 
     def test_the_login_account_is_not_extracted(self):
-        R.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
-        R.driver = PopupDriver(kept=["mario.rossi", "someone_else"])
+        R.config.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
+        R.state.driver = PopupDriver(kept=["mario.rossi", "someone_else"])
 
         self.assertEqual(R.extract_users_from_followers(), ["someone_else"])
 
     def test_the_name_is_compared_case_insensitively(self):
-        R.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
-        R.driver = PopupDriver(kept=["Mario.Rossi", "someone_else"])
+        R.config.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
+        R.state.driver = PopupDriver(kept=["Mario.Rossi", "someone_else"])
 
         self.assertEqual(R.extract_users_from_followers(), ["someone_else"])
 
     def test_nothing_is_filtered_without_a_saved_username(self):
-        R.ACCOUNT_USERNAME_FILE = os.path.join(self.workdir, "missing.json")
-        R.driver = PopupDriver(kept=["mario.rossi", "someone_else"])
+        R.config.ACCOUNT_USERNAME_FILE = os.path.join(self.workdir, "missing.json")
+        R.state.driver = PopupDriver(kept=["mario.rossi", "someone_else"])
 
         self.assertEqual(
             R.extract_users_from_followers(), ["mario.rossi", "someone_else"]
@@ -83,12 +83,12 @@ class QueueFunnelTest(unittest.TestCase):
     """The final funnel refuses the login account from any path."""
 
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         self.workdir = tempfile.mkdtemp()
-        R.QUEUE_FILE = os.path.join(self.workdir, "follow_queue.json")
-        R.FREQUENCIES_FILE = os.path.join(self.workdir, "user_frequencies.json")
-        R.FOLLOWED_FILE = os.path.join(self.workdir, "followed_history.json")
-        R.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
+        R.config.QUEUE_FILE = os.path.join(self.workdir, "follow_queue.json")
+        R.config.FREQUENCIES_FILE = os.path.join(self.workdir, "user_frequencies.json")
+        R.config.FOLLOWED_FILE = os.path.join(self.workdir, "followed_history.json")
+        R.config.ACCOUNT_USERNAME_FILE = save_own_username("mario.rossi")
 
     def queued(self):
         return [R.queue_username(item) for item in R.load_queue()]
@@ -99,7 +99,7 @@ class QueueFunnelTest(unittest.TestCase):
         self.assertEqual(set(self.queued()), {"someone_else"})
 
     def test_without_a_saved_username_everything_is_added(self):
-        R.ACCOUNT_USERNAME_FILE = os.path.join(self.workdir, "missing.json")
+        R.config.ACCOUNT_USERNAME_FILE = os.path.join(self.workdir, "missing.json")
 
         R.add_to_queue(["mario.rossi", "someone_else"])
 

@@ -1,4 +1,4 @@
-"""Exercises the queue's ranking against reciproca.py.
+"""Exercises the queue's ranking against the reciproca package.
 
 The invariant under test is that the order shown in the listbox is the order the
 follow loop consumes: both go through rank_queue(). They used to be computed
@@ -23,10 +23,10 @@ class QueueRankingTest(unittest.TestCase):
         # Redirect the app's files into a scratch directory so a test run cannot
         # touch a real queue or follow history.
         workdir = tempfile.mkdtemp()
-        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
-        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
-        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
-        R.last_scrape_frequencies = None
+        R.config.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.config.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.config.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+        R.state.last_scrape_frequencies = None
 
     def ranks(self, queue, frequencies=None):
         return [username for username, _, _ in R.rank_queue(queue, frequencies)]
@@ -73,11 +73,11 @@ class QueueRankingTest(unittest.TestCase):
         first session's, so it has to be followed before them - not after.
         """
         R.save_frequencies(R.Counter({"low1": 1, "low2": 1}))
-        R.last_scrape_frequencies = None
+        R.state.last_scrape_frequencies = None
         R.add_to_queue(["low1", "low2"])
 
         R.save_frequencies(R.Counter({"low1": 1, "low2": 1, "high": 9}))
-        R.last_scrape_frequencies = None
+        R.state.last_scrape_frequencies = None
         R.add_to_queue(["high"])
 
         on_disk = [R.queue_username(item) for item in R.load_queue()]
@@ -98,7 +98,7 @@ class QueueRankingTest(unittest.TestCase):
 
         # Second session finds alice under 4 more authors: 2 + 4 beats bob's 5.
         R.save_frequencies(R.load_frequencies() + R.Counter({"alice": 4}))
-        R.last_scrape_frequencies = None
+        R.state.last_scrape_frequencies = None
         R.add_to_queue(["alice"])
 
         self.assertEqual(dict(R.load_frequencies()), {"alice": 6, "bob": 5})
@@ -121,7 +121,7 @@ class FrequencyAccumulationTest(unittest.TestCase):
     file, dropping every earlier candidate to rank 0."""
 
     def setUp(self):
-        R.FREQUENCIES_FILE = os.path.join(tempfile.mkdtemp(), "user_frequencies.json")
+        R.config.FREQUENCIES_FILE = os.path.join(tempfile.mkdtemp(), "user_frequencies.json")
 
     def test_sessions_sum_onto_earlier_ranks(self):
         R.save_frequencies(R.Counter({"alice": 4}) + R.Counter(["alice", "bob"]))
@@ -313,11 +313,11 @@ class ScoringPassTest(unittest.TestCase):
 
     def setUp(self):
         workdir = tempfile.mkdtemp()
-        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
-        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
-        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
-        R.last_scrape_frequencies = None
-        _stubs.install_fake_ui(R)
+        R.config.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.config.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.config.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+        R.state.last_scrape_frequencies = None
+        _stubs.install_fake_ui()
         self.visited = []
 
     def scorer(self, scores):
@@ -373,11 +373,11 @@ class ScoringPassTest(unittest.TestCase):
 
         def score(username):
             self.visited.append(username)
-            R.scoring_stop.set()        # as if Stop were pressed during the first read
+            R.state.scoring_stop.set()        # as if Stop were pressed during the first read
             return 0.8
 
         R.score_queue(score, limit=10)
-        R.scoring_stop.clear()
+        R.state.scoring_stop.clear()
 
         queue = self.queue_now()
         self.assertEqual(queue["a"], 0.8, "the one already read is written down")
@@ -390,20 +390,20 @@ class ScoringPassTest(unittest.TestCase):
         R.save_frequencies(R.Counter({"a": 9, "b": 7}))
         R.add_to_queue(["a", "b"])
 
-        R.stop_requested.set()          # the search was stopped by hand
-        R.scoring_stop.set()
+        R.state.stop_requested.set()          # the search was stopped by hand
+        R.state.scoring_stop.set()
         try:
             R.run_scoring_pass(after_stop=True)     # clears its own flag, not the other
             self.assertEqual(R.score_queue(self.scorer({}), limit=10), 2)
-            self.assertTrue(R.stop_requested.is_set(), "the search stays stopped")
+            self.assertTrue(R.state.stop_requested.is_set(), "the search stays stopped")
         finally:
-            R.stop_requested.clear()
-            R.scoring_stop.clear()
+            R.state.stop_requested.clear()
+            R.state.scoring_stop.clear()
 
     def test_an_entry_written_by_an_older_version_can_still_be_scored(self):
         R.save_queue(["a", "b"])
         R.save_frequencies(R.Counter({"a": 9, "b": 7}))
-        R.last_scrape_frequencies = None
+        R.state.last_scrape_frequencies = None
 
         R.score_queue(self.scorer({}), limit=10)
         self.assertEqual(self.queue_now(), {"a": 0.5, "b": 0.5})
@@ -419,11 +419,11 @@ class TrimQueueTest(unittest.TestCase):
 
     def setUp(self):
         workdir = tempfile.mkdtemp()
-        R.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
-        R.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
-        R.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
-        R.last_scrape_frequencies = None
-        _stubs.install_fake_ui(R)
+        R.config.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.config.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.config.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+        R.state.last_scrape_frequencies = None
+        _stubs.install_fake_ui()
 
     def test_it_keeps_the_best_and_drops_the_rest(self):
         R.save_frequencies(R.Counter({"a": 9, "b": 7, "c": 5, "d": 3}))
@@ -442,7 +442,7 @@ class TrimQueueTest(unittest.TestCase):
         self.assertEqual(dict(R.load_frequencies()), {"a": 9, "d": 3})
 
         R.save_frequencies(R.load_frequencies() + R.Counter({"d": 8}))
-        R.last_scrape_frequencies = None
+        R.state.last_scrape_frequencies = None
         R.add_to_queue(["d"])
         self.assertEqual([R.queue_username(i) for i in R.load_queue()], ["d", "a"])
 

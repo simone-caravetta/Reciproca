@@ -1,15 +1,15 @@
-// Exercises EXTRACT_FOLLOWERS_JS from reciproca.py against a synthetic
+// Exercises EXTRACT_FOLLOWERS_JS from reciproca/selectors.py against a synthetic
 // followers dialog. Reads the real source out of the Python file so the test
 // cannot drift from the shipped code.
 const fs = require('fs');
 const { JSDOM } = require('jsdom');
 
-const py = fs.readFileSync(require('path').join(__dirname, '..', 'reciproca.py'), 'utf8');
+const py = fs.readFileSync(require('path').join(__dirname, '..', 'reciproca', 'selectors.py'), 'utf8');
 const start = py.indexOf('EXTRACT_FOLLOWERS_JS = r"""') + 'EXTRACT_FOLLOWERS_JS = r"""'.length;
 const end = py.indexOf('"""', start);
 const SCRIPT = py.slice(start, end);
 
-// Same values as FOLLOWING_BUTTON_MARKERS in reciproca.py
+// Same values as FOLLOWING_BUTTON_MARKERS in reciproca/markers.py
 const MARKERS = ['following', 'requested', 'segui già', 'seguendo', 'richiesta', 'in attesa'];
 
 // Selenium runs the script as a function body with arguments; mirror that.

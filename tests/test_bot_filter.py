@@ -174,10 +174,10 @@ class ReadProfileStatsTest(unittest.TestCase):
             return self.payload
 
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
 
     def read(self, payload):
-        R.driver = self.FakeDriver(payload)
+        R.state.driver = self.FakeDriver(payload)
         return R.read_profile_stats()
 
     def test_the_reported_misread(self):
@@ -229,7 +229,7 @@ class ReadProfileStatsTest(unittest.TestCase):
             def execute_script(self, script, *args):
                 raise _stubs.WebDriverException("gone")
 
-        R.driver = Broken()
+        R.state.driver = Broken()
         self.assertEqual(R.read_profile_stats(), (None, None, None))
 
 

@@ -41,81 +41,81 @@ class LiveDriver:
 
 class BrowserStateTest(unittest.TestCase):
     def setUp(self):
-        _stubs.install_fake_ui(R)
-        R.uf_non_followers = []
-        R.login_completed = True  # a live browser means the manual login went through
+        _stubs.install_fake_ui()
+        R.state.uf_non_followers = []
+        R.state.login_completed = True  # a live browser means the manual login went through
 
     def assert_no_browser(self):
-        self.assertEqual(R.browser_btn.state, 'normal', "Open Browser must be clickable")
-        self.assertEqual(R.start_btn.state, 'disabled', "Start Following must be off")
+        self.assertEqual(R.gui.browser_btn.state, 'normal', "Open Browser must be clickable")
+        self.assertEqual(R.gui.start_btn.state, 'disabled', "Start Following must be off")
 
     def assert_browser_ready(self):
-        self.assertEqual(R.browser_btn.state, 'disabled')
-        self.assertEqual(R.start_btn.state, 'normal')
+        self.assertEqual(R.gui.browser_btn.state, 'disabled')
+        self.assertEqual(R.gui.start_btn.state, 'normal')
 
     def test_probe_reports_a_closed_browser(self):
         self.assertFalse(R.browser_is_open(), "no driver at all")
 
-        R.driver = DeadDriver()
+        R.state.driver = DeadDriver()
         self.assertFalse(R.browser_is_open(), "driver whose window is gone")
 
         live = LiveDriver()
         live.window_handles = []
-        R.driver = live
+        R.state.driver = live
         self.assertFalse(R.browser_is_open(), "driver with no windows left")
 
-        R.driver = LiveDriver()
+        R.state.driver = LiveDriver()
         self.assertTrue(R.browser_is_open())
 
     def test_controls_follow_the_browser(self):
-        R.driver = LiveDriver()
+        R.state.driver = LiveDriver()
         R.update_follow_ui_state()
         self.assert_browser_ready()
 
-        R.driver = None
+        R.state.driver = None
         R.update_follow_ui_state()
         self.assert_no_browser()
 
     def test_closing_the_browser_makes_the_app_usable_again(self):
         dead = DeadDriver()
-        R.driver = dead
+        R.state.driver = dead
 
         R.handle_browser_closed()
 
-        self.assertIsNone(R.driver, "the dead session must not be kept")
+        self.assertIsNone(R.state.driver, "the dead session must not be kept")
         self.assertTrue(dead.quit_called, "chromedriver must be released")
         self.assert_no_browser()
 
     def test_refresh_notices_a_browser_that_died_during_a_session(self):
-        R.driver = DeadDriver()
+        R.state.driver = DeadDriver()
         R.refresh_browser_state()
-        self.assertIsNone(R.driver)
+        self.assertIsNone(R.state.driver)
         self.assert_no_browser()
 
     def test_refresh_leaves_a_working_browser_alone(self):
         live = LiveDriver()
-        R.driver = live
+        R.state.driver = live
         R.refresh_browser_state()
-        self.assertIs(R.driver, live)
+        self.assertIs(R.state.driver, live)
         self.assertFalse(live.quit_called)
         self.assert_browser_ready()
 
     def test_the_watcher_reschedules_itself_and_skips_busy_workers(self):
-        R.driver = DeadDriver()
+        R.state.driver = DeadDriver()
 
         # A worker thread is driving the session, so the GUI must not probe it.
-        R.active_threads[:] = [_AliveThread()]
+        R.state.active_threads[:] = [_AliveThread()]
         R.watch_browser()
-        self.assertIsNotNone(R.driver, "must not probe while a worker is running")
-        self.assertEqual(len(R.root.scheduled), 1, "must keep watching")
+        self.assertIsNotNone(R.state.driver, "must not probe while a worker is running")
+        self.assertEqual(len(R.gui.root.scheduled), 1, "must keep watching")
 
         # Worker finished: the next tick prunes it and notices the closed browser.
-        R.active_threads[:] = [_FinishedThread()]
+        R.state.active_threads[:] = [_FinishedThread()]
         R.watch_browser()
-        self.assertIsNone(R.driver)
-        self.assertEqual(R.active_threads, [], "finished threads must be pruned")
+        self.assertIsNone(R.state.driver)
+        self.assertEqual(R.state.active_threads, [], "finished threads must be pruned")
         self.assert_no_browser()
-        self.assertEqual(len(R.root.scheduled), 2)
+        self.assertEqual(len(R.gui.root.scheduled), 2)
 
     def test_the_watcher_keeps_going_after_an_unexpected_error(self):
         """It reschedules from a finally, so one bad tick cannot end the watch."""
@@ -124,10 +124,10 @@ class BrowserStateTest(unittest.TestCase):
             def window_handles(self):
                 raise RuntimeError("something unforeseen")
 
-        R.driver = Exploding()
-        R.active_threads[:] = []
+        R.state.driver = Exploding()
+        R.state.active_threads[:] = []
         R.watch_browser()
-        self.assertEqual(len(R.root.scheduled), 1)
+        self.assertEqual(len(R.gui.root.scheduled), 1)
 
 
 class OneSessionAtATimeTest(unittest.TestCase):
@@ -139,23 +139,23 @@ class OneSessionAtATimeTest(unittest.TestCase):
     """
 
     def setUp(self):
-        _stubs.install_fake_ui(R)
-        R.driver = LiveDriver()
-        R.login_completed = True  # a live browser means the manual login went through
-        R.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
+        _stubs.install_fake_ui()
+        R.state.driver = LiveDriver()
+        R.state.login_completed = True  # a live browser means the manual login went through
+        R.state.uf_non_followers = ["someone"]  # otherwise Start Unfollow is off anyway
 
     def test_both_start_buttons_are_off_while_a_session_runs(self):
         R.update_follow_ui_state()
         R.update_unfollow_ui_state()
-        self.assertEqual(R.start_btn.state, 'normal', "idle: both are available")
-        self.assertEqual(R.uf_start_btn.state, 'normal')
+        self.assertEqual(R.gui.start_btn.state, 'normal', "idle: both are available")
+        self.assertEqual(R.gui.uf_start_btn.state, 'normal')
 
         self.assertTrue(R.begin_session())
 
-        self.assertEqual(R.start_btn.state, 'disabled')
-        self.assertEqual(R.uf_start_btn.state, 'disabled')
-        self.assertEqual(R.stop_btn.state, 'normal', "Stop is how you get out")
-        self.assertEqual(R.uf_stop_btn.state, 'normal')
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.uf_start_btn.state, 'disabled')
+        self.assertEqual(R.gui.stop_btn.state, 'normal', "Stop is how you get out")
+        self.assertEqual(R.gui.uf_stop_btn.state, 'normal')
 
     def test_a_second_session_is_refused(self):
         self.assertTrue(R.begin_session())
@@ -168,26 +168,26 @@ class OneSessionAtATimeTest(unittest.TestCase):
         R.run_unfollow()
         R.run_follow()
 
-        self.assertEqual(R.active_threads, [], "no worker may be started")
+        self.assertEqual(R.state.active_threads, [], "no worker may be started")
 
     def test_finishing_hands_the_browser_back(self):
         R.begin_session()
         R.end_session()
 
-        self.assertFalse(R.session_running.is_set())
-        self.assertEqual(R.start_btn.state, 'normal')
-        self.assertEqual(R.uf_start_btn.state, 'normal')
-        self.assertEqual(R.stop_btn.state, 'disabled')
+        self.assertFalse(R.state.session_running.is_set())
+        self.assertEqual(R.gui.start_btn.state, 'normal')
+        self.assertEqual(R.gui.uf_start_btn.state, 'normal')
+        self.assertEqual(R.gui.stop_btn.state, 'disabled')
 
     def test_a_session_that_loses_the_browser_ends_with_start_off(self):
         R.begin_session()
-        R.driver = DeadDriver()
+        R.state.driver = DeadDriver()
 
         R.end_session()
 
-        self.assertIsNone(R.driver)
-        self.assertEqual(R.start_btn.state, 'disabled')
-        self.assertEqual(R.browser_btn.state, 'normal')
+        self.assertIsNone(R.state.driver)
+        self.assertEqual(R.gui.start_btn.state, 'disabled')
+        self.assertEqual(R.gui.browser_btn.state, 'normal')
 
 
 class _AliveThread:

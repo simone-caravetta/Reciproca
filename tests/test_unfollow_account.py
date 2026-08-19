@@ -37,17 +37,17 @@ class DriverLoggedInAs:
 
 class UnfollowAccountTest(unittest.TestCase):
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         self.workdir = tempfile.mkdtemp()
-        R.UNFOLLOW_PROGRESS_FILE = os.path.join(self.workdir, "unfollow_progress.json")
-        R.UNFOLLOW_SESSION_FILE = os.path.join(self.workdir, "unfollow_last_session.json")
+        R.config.UNFOLLOW_PROGRESS_FILE = os.path.join(self.workdir, "unfollow_progress.json")
+        R.config.UNFOLLOW_SESSION_FILE = os.path.join(self.workdir, "unfollow_last_session.json")
         # uf_progress_archive() builds its path through data_path()
-        R.data_path = lambda name: os.path.join(self.workdir, name)
-        R.uf_non_followers = ["someone"]
-        R.uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
+        R.config.data_path = lambda name: os.path.join(self.workdir, name)
+        R.state.uf_non_followers = ["someone"]
+        R.state.uf_progress = {"processed": [], "unfollowed": [], "skipped": []}
 
     def write_progress(self, unfollowed):
-        with open(R.UNFOLLOW_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+        with open(R.config.UNFOLLOW_PROGRESS_FILE, 'w', encoding='utf-8') as f:
             json.dump({
                 "processed": list(unfollowed),
                 "unfollowed": list(unfollowed),
@@ -55,19 +55,19 @@ class UnfollowAccountTest(unittest.TestCase):
             }, f)
 
     def read_progress(self, path=None):
-        with open(path or R.UNFOLLOW_PROGRESS_FILE, 'r', encoding='utf-8') as f:
+        with open(path or R.config.UNFOLLOW_PROGRESS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
 
     def test_the_same_account_keeps_its_progress(self):
         """The user's actual workflow: finish a list, re-export, carry on."""
         self.write_progress(["gone1", "gone2"])
         R.uf_save_session(account_id="12345")
-        R.driver = DriverLoggedInAs("12345")
+        R.state.driver = DriverLoggedInAs("12345")
 
         R.uf_check_account()
 
         self.assertEqual(self.read_progress()["unfollowed"], ["gone1", "gone2"])
-        self.assertEqual(R.uf_non_followers, ["someone"], "the loaded list stands")
+        self.assertEqual(R.state.uf_non_followers, ["someone"], "the loaded list stands")
         self.assertEqual(messagebox.shown, [], "nothing to tell the user about")
 
     def test_an_unidentifiable_account_changes_nothing(self):
@@ -75,9 +75,9 @@ class UnfollowAccountTest(unittest.TestCase):
         self.write_progress(["gone1"])
         R.uf_save_session(account_id="12345")
 
-        R.driver = None
+        R.state.driver = None
         R.uf_check_account()
-        R.driver = DriverLoggedInAs(None)  # logged out: no cookie
+        R.state.driver = DriverLoggedInAs(None)  # logged out: no cookie
         R.uf_check_account()
 
         self.assertEqual(self.read_progress()["unfollowed"], ["gone1"])
@@ -88,7 +88,7 @@ class UnfollowAccountTest(unittest.TestCase):
         """Progress recorded before this check existed belongs to whoever is logged
         in now - there is nothing else it could belong to."""
         self.write_progress(["gone1"])
-        R.driver = DriverLoggedInAs("12345")
+        R.state.driver = DriverLoggedInAs("12345")
 
         R.uf_check_account()
 
@@ -101,7 +101,7 @@ class UnfollowAccountTest(unittest.TestCase):
         R.uf_save_session(
             account_id="12345", followers_file="/tmp/f.json", following_file="/tmp/g.json"
         )
-        R.driver = DriverLoggedInAs("99999")
+        R.state.driver = DriverLoggedInAs("99999")
 
         R.uf_check_account()
 
@@ -109,26 +109,26 @@ class UnfollowAccountTest(unittest.TestCase):
         self.assertTrue(os.path.exists(parked), "the old record must survive")
         self.assertEqual(self.read_progress(parked)["unfollowed"], ["gone1", "gone2"])
         self.assertFalse(
-            os.path.exists(R.UNFOLLOW_PROGRESS_FILE),
+            os.path.exists(R.config.UNFOLLOW_PROGRESS_FILE),
             "the new account starts with no progress of its own",
         )
 
         session = R.uf_load_session()
         self.assertEqual(session.get("account_id"), "99999")
         self.assertIsNone(session.get("followers_file"), "the export was the other account's")
-        self.assertEqual(R.uf_non_followers, [], "so the loaded list goes too")
+        self.assertEqual(R.state.uf_non_followers, [], "so the loaded list goes too")
         self.assertEqual([kind for kind, _, _ in messagebox.shown], ["showinfo"])
 
     def test_going_back_to_an_account_restores_its_progress(self):
         # Work on the first account, then switch away.
         self.write_progress(["first1", "first2"])
         R.uf_save_session(account_id="11111")
-        R.driver = DriverLoggedInAs("22222")
+        R.state.driver = DriverLoggedInAs("22222")
         R.uf_check_account()
 
         # Do some work on the second account, then switch back.
         self.write_progress(["second1"])
-        R.driver = DriverLoggedInAs("11111")
+        R.state.driver = DriverLoggedInAs("11111")
         R.uf_check_account()
 
         self.assertEqual(
@@ -141,14 +141,14 @@ class UnfollowAccountTest(unittest.TestCase):
 
 class UnfollowResetTest(unittest.TestCase):
     def setUp(self):
-        _stubs.install_fake_ui(R)
+        _stubs.install_fake_ui()
         workdir = tempfile.mkdtemp()
-        R.UNFOLLOW_PROGRESS_FILE = os.path.join(workdir, "unfollow_progress.json")
-        R.UNFOLLOW_SESSION_FILE = os.path.join(workdir, "unfollow_last_session.json")
-        R.uf_progress_bar = _stubs.FakeWidget()
-        R.uf_status_label = _stubs.FakeWidget()
-        R.uf_non_followers = ["a", "b", "c"]
-        with open(R.UNFOLLOW_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+        R.config.UNFOLLOW_PROGRESS_FILE = os.path.join(workdir, "unfollow_progress.json")
+        R.config.UNFOLLOW_SESSION_FILE = os.path.join(workdir, "unfollow_last_session.json")
+        R.state.uf_progress_bar = _stubs.FakeWidget()
+        R.gui.uf_status_label = _stubs.FakeWidget()
+        R.state.uf_non_followers = ["a", "b", "c"]
+        with open(R.config.UNFOLLOW_PROGRESS_FILE, 'w', encoding='utf-8') as f:
             json.dump({"processed": ["a", "b"], "unfollowed": ["a"], "skipped": ["b"]}, f)
 
     def test_the_warning_says_what_is_lost(self):
@@ -167,18 +167,18 @@ class UnfollowResetTest(unittest.TestCase):
 
         R.reset_unfollow_app()
 
-        self.assertTrue(os.path.exists(R.UNFOLLOW_PROGRESS_FILE))
-        self.assertEqual(R.uf_non_followers, ["a", "b", "c"])
+        self.assertTrue(os.path.exists(R.config.UNFOLLOW_PROGRESS_FILE))
+        self.assertEqual(R.state.uf_non_followers, ["a", "b", "c"])
 
     def test_confirming_clears_progress_and_session(self):
         messagebox.answer = True
 
         R.reset_unfollow_app()
 
-        self.assertFalse(os.path.exists(R.UNFOLLOW_PROGRESS_FILE))
-        self.assertFalse(os.path.exists(R.UNFOLLOW_SESSION_FILE))
-        self.assertEqual(R.uf_non_followers, [])
-        self.assertEqual(R.uf_progress, {"processed": [], "unfollowed": [], "skipped": []})
+        self.assertFalse(os.path.exists(R.config.UNFOLLOW_PROGRESS_FILE))
+        self.assertFalse(os.path.exists(R.config.UNFOLLOW_SESSION_FILE))
+        self.assertEqual(R.state.uf_non_followers, [])
+        self.assertEqual(R.state.uf_progress, {"processed": [], "unfollowed": [], "skipped": []})
 
 
 if __name__ == "__main__":
