@@ -50,6 +50,7 @@ from .config import (
     AUTHORS_FILE,
     CONFIG,
     CONFIG_FILE,
+    DEFAULT_CONFIG,
     FOLLOWED_FILE,
     FREQUENCIES_FILE,
     HASHTAGS_FILE,
