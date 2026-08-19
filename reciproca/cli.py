@@ -242,13 +242,18 @@ _repl_threads = []
 
 # Mid-session question handshake. A worker thread that needs an answer from the
 # user - the after-search tri-state, mirroring the GUI's messagebox - sets
-# _question and waits; the main loop, which owns the terminal, renders it at
-# the next prompt and posts the answer. While a question is pending the prompt
-# IS the question, so typing `status` there is not possible - the cycle is
-# paused, exactly like the GUI's modal dialog blocks the session.
+# _question and waits; the main loop, which owns the terminal, posts the answer.
+# While a question is pending the next typed line IS the answer, so typing
+# `status` there is not possible - the cycle is paused, exactly like the GUI's
+# modal dialog blocks the session.
 _question = None
 _question_event = None
 _question_answer = None
+# The worker renders the question itself as soon as it sets it - the main loop
+# is usually blocked in input() and would otherwise show it only when the user
+# presses Enter, leaving the session paused on an invisible question. The main
+# loop re-renders on answer attempts after the first, which it consumed.
+_question_rendered = False
 
 
 def _shell_decision(info):
@@ -258,15 +263,19 @@ def _shell_decision(info):
     "save_stop" | "discard". A `stop` request while the question is open is
     treated as "discard" - the user wants out.
     """
-    global _question, _question_event, _question_answer
+    global _question, _question_event, _question_answer, _question_rendered
     question = (
         f"❓ Search finished: {info['ranked_count']} users found"
         f" (best affinity {info['top_freq']:.2f}, {info['hashtag_count']} hashtags).\n"
         "   [f]ollow now   [s]ave to queue and stop   [d]iscard? "
     )
     _question = question
+    _question_rendered = True
     _question_event = threading.Event()
     _question_answer = None
+    # The main loop may be blocked in input() for minutes; show the question
+    # from here so the user sees it the moment the search ends.
+    print("\n" + question, end="", flush=True)
     try:
         while not _question_event.wait(timeout=0.5):
             if state.stop_requested.is_set() or os.path.exists(config.STOP_FLAG_FILE):
@@ -877,7 +886,7 @@ def repl(commands=None):
     # The question branch below assigns _question_answer; without the global
     # declaration Python would shadow it with a local that dies at each line,
     # and the waiting worker would read None instead of the answer.
-    global _interactive, _question, _question_event, _question_answer
+    global _interactive, _question, _question_event, _question_answer, _question_rendered
     print(REPL_BANNER)
     parser = build_parser()
     _interactive = True
@@ -897,8 +906,12 @@ def repl(commands=None):
             if _question is not None:
                 # A worker thread is waiting for an answer; this line is it.
                 # The GUI pauses the session on a modal messagebox; the shell
-                # pauses it on this question.
-                print("\n" + _question, end="", flush=True)
+                # pauses it on this question. The worker already rendered the
+                # question when it set it; re-render only on retries.
+                if _question_rendered:
+                    _question_rendered = False
+                else:
+                    print("\n" + _question, end="", flush=True)
                 answer = raw.strip().lower()
                 if answer in ("f", "follow", "y", "yes"):
                     _question_answer = "follow"
