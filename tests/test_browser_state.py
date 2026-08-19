@@ -6,6 +6,8 @@ Browser stayed disabled, leaving no way back short of restarting the app.
 
     python3 tests/test_browser_state.py
 """
+import os
+import tempfile
 import unittest
 
 import _stubs  # noqa: F401  - installs the Selenium/Tkinter stubs
@@ -188,6 +190,43 @@ class OneSessionAtATimeTest(unittest.TestCase):
         self.assertIsNone(R.state.driver)
         self.assertEqual(R.gui.start_btn.state, 'disabled')
         self.assertEqual(R.gui.browser_btn.state, 'normal')
+
+    def _isolate_queue(self):
+        """Point the queue at an empty file, so a queue-mode cycle cannot start."""
+        workdir = tempfile.mkdtemp()
+        R.config.QUEUE_FILE = os.path.join(workdir, "follow_queue.json")
+        R.config.FREQUENCIES_FILE = os.path.join(workdir, "user_frequencies.json")
+        R.config.FOLLOWED_FILE = os.path.join(workdir, "followed_history.json")
+
+    def test_a_cycle_refuses_a_session_claimed_elsewhere(self):
+        """The cycle never releases a claim that is not its own."""
+        R.begin_session()
+
+        result = R.follow_cycle(mode="queue", limit=1)
+
+        self.assertEqual(result["error"], "session_busy")
+        self.assertTrue(R.state.session_running.is_set(),
+                        "the owner's claim stays put")
+
+    def test_a_failed_cycle_releases_its_own_claim(self):
+        """A cycle that cannot run still hands the browser back.
+
+        This is the regression for the double-claim bug: the GUI's run_follow
+        used to claim the session and then follow_cycle refused with
+        session_busy before its finally block, so the flag stayed set forever
+        and every later Start click died silently.
+        """
+        self._isolate_queue()
+        R.state.driver = None  # the browser check is the failure we want
+
+        result = R.follow_cycle(mode="queue", limit=1)
+
+        self.assertEqual(result["error"], "browser_not_open")
+        self.assertFalse(R.state.session_running.is_set(),
+                         "a failed cycle releases its own claim")
+        result2 = R.follow_cycle(mode="queue", limit=1)
+        self.assertEqual(result2["error"], "browser_not_open",
+                         "a later cycle can claim the session again")
 
 
 class _AliveThread:

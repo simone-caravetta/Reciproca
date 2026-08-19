@@ -388,6 +388,7 @@ def _render_follow_result(result):
     """Turn follow_cycle's result into the dialogs the GUI always showed."""
     if not result.get("ok"):
         errors = {
+            "session_busy": ("Error", "A session is already running - stop it before starting another"),
             "browser_not_open": ("Error", "Please open browser first"),
             "queue_empty": ("Queue Empty", "No users in queue. Use 'Deep Search' mode to find users."),
             "no_hashtags": ("Error", "Please add at least one hashtag"),
@@ -448,9 +449,15 @@ def follow_logic():
 
 
 def run_follow():
-    """Start follow in background thread."""
-    from reciproca.browser import begin_session
-    if not begin_session():
+    """Start follow in background thread.
+
+    Peek at the session flag so a busy session spawns nothing - but the claim
+    itself is follow_cycle()'s, end to end. Claiming it here too (as the
+    monolith's run_follow did) would double the claim: follow_cycle would
+    refuse with session_busy, and the claim it could not take would never be
+    released, so every later Start click would die silently.
+    """
+    if state.session_running.is_set():
         return
     thread = threading.Thread(target=follow_logic, daemon=True)
     thread.start()
@@ -494,9 +501,12 @@ def unfollow_logic():
 
 
 def run_unfollow():
-    """Start unfollow in background thread."""
-    from reciproca.browser import begin_session
-    if not begin_session():
+    """Start unfollow in background thread.
+
+    Like run_follow: peek at the flag, but let unfollow_cycle() claim the
+    session.
+    """
+    if state.session_running.is_set():
         return
     thread = threading.Thread(target=unfollow_logic, daemon=True)
     thread.start()

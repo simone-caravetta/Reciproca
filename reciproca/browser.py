@@ -263,6 +263,13 @@ def can_open_browser():
     return state.driver is None and not state.browser_opening.is_set()
 
 
+# Sessions are claimed from whatever thread runs a cycle - the GUI's worker
+# thread, the CLI's main thread, an MCP worker thread. The check-then-set
+# below must not let two callers both see the flag clear, so the claim is
+# serialized.
+_session_lock = threading.Lock()
+
+
 def begin_session():
     """Claim the browser for one session, or refuse if another already has it.
 
@@ -273,15 +280,15 @@ def begin_session():
     following one the unfollow session was on.
 
     Both tabs disable their Start buttons while a session runs; this is the guard
-    that does not depend on a button state being right. Called from the GUI thread
-    only, so the check and the claim cannot race.
+    that does not depend on a button state being right.
     """
-    if state.session_running.is_set():
-        log("⚠️ A session is already running - stop it before starting another", 'warning')
-        return False
+    with _session_lock:
+        if state.session_running.is_set():
+            log("⚠️ A session is already running - stop it before starting another", 'warning')
+            return False
 
-    state.session_running.set()
-    state.stop_requested.clear()
+        state.session_running.set()
+        state.stop_requested.clear()
 
     # A stop.flag left behind by a `stop` command from a previous run must not
     # kill the new session at its first pause.

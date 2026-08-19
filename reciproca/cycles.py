@@ -65,12 +65,13 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
     state.stats = SessionStats(on_update=hooks.stats_handler())
     state.stop_requested.clear()
 
+    # The same keys the GUI entry fields are prefilled from.
     if delay_min is None:
-        delay_min = int(config.CONFIG["FOLLOW_DELAY_MIN"])
+        delay_min = int(config.CONFIG["DEFAULT_DELAY_MIN"])
     if delay_max is None:
-        delay_max = int(config.CONFIG["FOLLOW_DELAY_MAX"])
+        delay_max = int(config.CONFIG["DEFAULT_DELAY_MAX"])
     if limit is None:
-        limit = int(config.CONFIG["FOLLOW_LIMIT"])
+        limit = int(config.CONFIG["MAX_FOLLOWS_PER_SESSION"])
 
     result = {"ok": True, "error": None, "report": None, "mode": mode,
               "ranked_count": 0, "top_freq": 0, "followed": 0,
@@ -222,12 +223,13 @@ def unfollow_cycle(delay_min=None, delay_max=None, limit=None):
     state.uf_stats = SessionStats(on_update=hooks.unfollow_stats_handler())
     state.stop_requested.clear()
 
+    # The same keys the GUI entry fields are prefilled from.
     if delay_min is None:
         delay_min = int(config.CONFIG["UNFOLLOW_DELAY_MIN"])
     if delay_max is None:
         delay_max = int(config.CONFIG["UNFOLLOW_DELAY_MAX"])
     if limit is None:
-        limit = int(config.CONFIG["UNFOLLOW_LIMIT"])
+        limit = int(config.CONFIG["UNFOLLOW_DAILY_LIMIT"])
 
     result = {"ok": True, "error": None, "report": None, "processed": 0,
               "unfollowed": 0}
