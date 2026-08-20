@@ -278,6 +278,9 @@ def _shell_decision(info):
 
 
 def cmd_follow(args):
+    # Both spellings of the save choice are accepted (the docs and the plan use
+    # "save-stop", the engine uses "save_stop"); the parser normalizes here.
+    args.after_search = args.after_search.replace("-", "_")
     # In the interactive shell the browser may predate this command - leave it
     # for the next one. A one-shot CLI process always opened it just now, so it
     # releases it: open -> run -> quit, or a Chrome left behind holds the
@@ -815,7 +818,8 @@ Examples:
     f.add_argument("--delay-min", type=int, help="seconds between follows (default from config)")
     f.add_argument("--delay-max", type=int, help="seconds between follows (default from config)")
     f.add_argument("--limit", type=int, help="how many to follow (default from config)")
-    f.add_argument("--after-search", choices=["follow", "save_stop", "discard"], default="follow",
+    f.add_argument("--after-search", choices=["follow", "save_stop", "save-stop", "discard"],
+                   default="follow",
                    help="what to do with the ranked results when the search ends "
                         "(default follow; save_stop = add them to the queue and stop)")
     f.add_argument("--no-score", action="store_true",
@@ -1065,7 +1069,7 @@ def repl(commands=None):
                 answer = raw.strip().lower()
                 if answer in ("f", "follow", "y", "yes"):
                     _question_answer = "follow"
-                elif answer in ("s", "save", "save_stop"):
+                elif answer in ("s", "save", "save_stop", "save-stop"):
                     _question_answer = "save_stop"
                 elif answer in ("d", "discard"):
                     _question_answer = "discard"
