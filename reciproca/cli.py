@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 
-from reciproca import config, logging_sink, state
+from reciproca import config, state
 from reciproca import browser, queue as queue_mod, unfollow, persistence, cycles, semantic, follow
 
 
@@ -674,12 +674,13 @@ def cmd_status(args):
 
 
 def cmd_logs(args):
-    recent = list(logging_sink.RECENT)
+    # The log file, not the RECENT buffer: the buffer is process-local and a
+    # fresh process's `logs` would be empty, while the file is the session's
+    # history across processes.
     if args.follow:
-        tail = recent[-args.tail:]
-        print("\n".join(tail))
-        # Follow the log file itself, so lines written by any process appear.
         with open(config.LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            tail = f.readlines()[-args.tail:]
+            print("".join(tail), end="", flush=True)
             f.seek(0, os.SEEK_END)
             try:
                 while True:
@@ -691,7 +692,9 @@ def cmd_logs(args):
             except KeyboardInterrupt:
                 print()
         return 0
-    print("\n".join(recent[-args.tail:]))
+    with open(config.LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+        tail = f.readlines()[-args.tail:]
+    print("".join(tail), end="", flush=True)
     return 0
 
 
