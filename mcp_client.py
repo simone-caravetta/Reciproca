@@ -21,6 +21,7 @@ Requires the agent stack: pip install -r requirements-agent.txt
 """
 import asyncio
 import json
+import os
 import shlex
 import sys
 
@@ -30,6 +31,21 @@ try:
 except ImportError:
     print("The mcp SDK is not installed - pip install -r requirements-agent.txt")
     sys.exit(1)
+
+
+def server_env():
+    """Environment for the server child process.
+
+    The mcp SDK only lets a safe allowlist through (HOME, PATH, TERM, ...),
+    so the server would inherit no DISPLAY and Chrome would die at startup
+    with a cryptic "Chrome instance exited". The display variables are handed
+    through explicitly, both X11 and Wayland.
+    """
+    return {
+        key: os.environ[key]
+        for key in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR")
+        if os.environ.get(key)
+    }
 
 
 def parse(line):
@@ -65,6 +81,7 @@ async def main():
     server = StdioServerParameters(
         command=sys.executable,
         args=["-m", "reciproca.mcp_server"],
+        env=server_env(),
     )
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:

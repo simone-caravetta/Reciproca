@@ -113,9 +113,33 @@ def open_browser(headless=False):
     """Open Chrome browser with persistent profile."""
     service = None
     try:
+        if not headless and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            # The MCP client sanitizes the server's environment to a safe
+            # allowlist that has no DISPLAY, so a visible Chrome would start
+            # and die in a fraction of a second, reported as a baffling
+            # "Chrome instance exited". Say what is actually missing.
+            log("❌ No display to open Chrome on: DISPLAY is not set.", 'error')
+            log("   The launcher must pass the display variables to the server process.", 'error')
+            hooks.notify_user(
+                "Browser Error",
+                "No display to open Chrome on: DISPLAY is not set.\n\n"
+                "The launcher (mcp_client.py, the agent) must pass the display "
+                "variables to the server process.",
+                'error',
+            )
+            return
+
         log("🌐 Initializing Chrome...", 'info')
 
-        service = Service(ChromeDriverManager().install())
+        # Chromedriver's own output goes to a file next to the app: the
+        # session-not-created errors the user sees tell them to "examine the
+        # ChromeDriver verbose log", and without this there is no such log to
+        # examine. Non-verbose keeps it small; it still records why Chrome
+        # failed to start.
+        service = Service(
+            ChromeDriverManager().install(),
+            log_output=config.data_path("chromedriver.log"),
+        )
         state.driver = webdriver.Chrome(service=service, options=chrome_options(headless))
 
         # Override navigator.webdriver
