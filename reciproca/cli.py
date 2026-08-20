@@ -972,7 +972,15 @@ full manual, e.g. `help follow`.""",
     return parser
 
 
-REPL_BANNER = """Welcome to Reciproca - the Instagram follow & unfollow assistant.
+REPL_BANNER = """
+██████╗ ███████╗ ██████╗██╗     ██████╗ ██████╗  ██████╗ ██████╗  █████╗
+██╔══██╗██╔════╝██╔════╝██║     ██╔══██╗██╔══██╗██╔═══██╗██╔════╝██╔══██╗
+██████╔╝█████╗  ██║     ██║     ██████╔╝██████╔╝██║   ██║██║     ███████║
+██╔══██╗██╔══╝  ██║     ██║     ██╔═══╝ ██╔══██╗██║   ██║██║     ██╔══██║
+██║  ██║███████╗╚██████╗██║     ██║     ██║  ██║╚██████╔╝╚██████╗██║  ██║
+╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝     ╚═╝     ╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝
+
+The Instagram follow & unfollow assistant.
 
 What you can do here:
   browser open / close / status   manage Chrome (log in with your account)
