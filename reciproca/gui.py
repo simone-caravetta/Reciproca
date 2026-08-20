@@ -1565,26 +1565,32 @@ def setup_gui():
     action_frame = ttk.Frame(settings_scrollable_frame, padding=10)
     action_frame.pack(fill='x', pady=(10, 10), padx=5)
 
+    def _sync_quick_entries():
+        """Refresh the Follow/Unfollow tab quick fields from the config just
+        written. Sessions read those entry widgets, so stale values left in
+        them are exactly the "runs with a different setting than the file"
+        divergence."""
+        for widget, key in ((delay_min_entry, "DEFAULT_DELAY_MIN"),
+                            (delay_max_entry, "DEFAULT_DELAY_MAX"),
+                            (limit_entry, "MAX_FOLLOWS_PER_SESSION"),
+                            (uf_delay_min_entry, "UNFOLLOW_DELAY_MIN"),
+                            (uf_delay_max_entry, "UNFOLLOW_DELAY_MAX"),
+                            (uf_limit_entry, "UNFOLLOW_DAILY_LIMIT")):
+            widget.delete(0, tk.END)
+            widget.insert(0, str(config.CONFIG[key]))
+
     def apply_config():
         """Apply the config changes from GUI entries."""
         for key, entry in config_entries.items():
             try:
-                value = entry.get().strip()
-                if key in ["DEFAULT_DELAY_MIN", "DEFAULT_DELAY_MAX", "BROWSER_TIMEOUT",
-                           "COOLDOWN_DURATION", "HASHTAG_BREAK_DURATION", "FOLLOW_BATCH_COOLDOWN",
-                           "SESSION_DURATION_MAX", "EXTRACTION_PAUSE_DURATION"]:
-                    config.CONFIG[key] = int(value)
-                elif key in ["TARGET_AUTHORS_PER_HASHTAG", "MAX_SCROLLS_PER_HASHTAG", "FOLLOWER_SCROLL_COUNT",
-                             "AUTHORS_BEFORE_COOLDOWN", "FOLLOW_BATCH_SIZE", "MAX_FOLLOWS_PER_SESSION",
-                             "RETRY_ATTEMPTS", "RETRY_BACKOFF"]:
-                    config.CONFIG[key] = int(value)
-                else:
-                    config.CONFIG[key] = int(value)
+                # Every settings row is a numeric field, whatever its group.
+                config.CONFIG[key] = int(entry.get().strip())
             except ValueError:
                 messagebox.showerror("Invalid Value", f"Could not convert '{entry.get()}' to a number for {key}")
                 return
 
         config.save_config(config.CONFIG)
+        _sync_quick_entries()
         log("✅ Configuration saved!", 'success')
         messagebox.showinfo("Saved", "Configuration has been saved. Changes will take effect on next session.")
 

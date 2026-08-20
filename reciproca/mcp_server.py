@@ -688,6 +688,23 @@ def config_reset() -> dict:
     return _ok()
 
 
+@mcp.tool()
+@_safe
+def config_reload() -> dict:
+    """Re-read the config file into this process, in place.
+
+    This server snapshots the settings at startup, so changes made through
+    the GUI, the CLI or an external editor are invisible here until this
+    tool runs - and the next config_set would otherwise overwrite them with
+    the stale snapshot. Returns what changed, if anything.
+    """
+    fresh = config.load_config()
+    changed = {k: fresh[k] for k in fresh if fresh[k] != config.CONFIG.get(k)}
+    config.CONFIG.clear()
+    config.CONFIG.update(fresh)
+    return _ok(changed=changed, reloaded=len(changed))
+
+
 # ---------------------------------------------------------------------------
 # status / logs / stop
 # ---------------------------------------------------------------------------

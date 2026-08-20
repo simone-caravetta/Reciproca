@@ -620,7 +620,11 @@ def cmd_config_reset(args):
     if not _confirm(args, "Reset every setting to its default?"):
         print("Reset cancelled.")
         return 0
-    config.CONFIG = config.DEFAULT_CONFIG.copy()
+    # Mutated in place, not rebound: other modules hold the same dict object
+    # (the façade's CONFIG is bound at import), and a rebind would quietly
+    # leave them looking at the old settings.
+    config.CONFIG.clear()
+    config.CONFIG.update(config.DEFAULT_CONFIG)
     config.save_config(config.CONFIG)
     print("✅ Config reset.")
     return 0

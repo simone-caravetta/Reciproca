@@ -34,7 +34,7 @@ EXPECTED_TOOLS = {
     "queue_list", "queue_add", "queue_remove", "queue_clear", "queue_score",
     "queue_trim", "queue_import", "queue_export",
     "hashtags_list", "hashtags_add", "hashtags_remove", "hashtags_clear",
-    "config_get", "config_set", "config_reset",
+    "config_get", "config_set", "config_reset", "config_reload",
     "status", "logs_tail", "stop",
 }
 
@@ -279,6 +279,28 @@ class MCPToolTest(unittest.TestCase):
             R.config.CONFIG["DEFAULT_DELAY_MIN"],
             R.config.DEFAULT_CONFIG["DEFAULT_DELAY_MIN"],
         )
+
+    def test_config_reload_picks_up_external_edits_in_place(self):
+        # Simulate an external writer (GUI, CLI, editor): the file changes
+        # behind this process's back, while memory still has the old value.
+        R.config.CONFIG["DEFAULT_DELAY_MIN"] = 99
+        R.config.save_config(R.config.CONFIG)
+        R.config.CONFIG["DEFAULT_DELAY_MIN"] = 7
+        with open(R.config.CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump({**R.config.CONFIG, "DEFAULT_DELAY_MIN": 99}, f)
+
+        result = ms.config_reload()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changed"], {"DEFAULT_DELAY_MIN": 99})
+        self.assertEqual(result["reloaded"], 1)
+        self.assertEqual(R.config.CONFIG["DEFAULT_DELAY_MIN"], 99)
+
+    def test_config_reload_keeps_the_shared_dict_object(self):
+        # The in-place rule: the dict itself must survive, or every other
+        # module holding the façade's CONFIG would silently go stale.
+        before = R.config.CONFIG
+        ms.config_reload()
+        self.assertIs(R.config.CONFIG, before)
 
     # ------------------------------------------------------------ unfollow
 
