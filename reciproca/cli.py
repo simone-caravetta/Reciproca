@@ -105,8 +105,12 @@ def cmd_browser_open(args):
         return 1
     browser.open_browser(headless=args.headless)
     if state.driver is None:
-        print("Chrome did not open - see follow_bot.log.", file=sys.stderr)
-        print("If a Chrome window is still open from another command, close it and retry.", file=sys.stderr)
+        if _chrome_window_on_profile():
+            print("✗ A Chrome window from another command is open and holds the profile.", file=sys.stderr)
+            print("  Close it, then retry.", file=sys.stderr)
+        else:
+            print("Chrome did not open - see follow_bot.log.", file=sys.stderr)
+            print("If a Chrome window is still open from another command, close it and retry.", file=sys.stderr)
         return 1
     # The login watcher reports asynchronously from its own thread; give it a
     # few seconds to probe the cookie before saying whether the session is in.
@@ -124,8 +128,10 @@ def cmd_browser_open(args):
             print("✅ Browser open. Log in to Instagram in the Chrome window -")
             print("   this session picks the login up on its own (`status` confirms it).")
         else:
-            print("✅ Browser open. Log in to Instagram in the Chrome window,")
-            print("   then close it: the next command re-opens Chrome with the login saved.")
+            print("✅ Browser open. Log in to Instagram in the Chrome window.")
+            print("⚠️  This window locks the profile until you close it: no other command")
+            print("    (shell or CLI) can use the browser. The next command after you close")
+            print("    it re-opens Chrome with the login already saved.")
     return 0
 
 
@@ -190,6 +196,11 @@ def ensure_browser(headless, login_timeout):
         print("Opening headless Chrome - this only works with a login already saved in chrome_profile/.")
     browser.open_browser(headless=headless)
     if state.driver is None:
+        if _chrome_window_on_profile():
+            return False, (
+                "A Chrome window from another command is still open and holds the profile.\n"
+                "Close it, then retry this command."
+            )
         return False, (
             "Chrome did not open - see follow_bot.log.\n"
             "If a Chrome window is still open from another command, close it and retry."
@@ -851,8 +862,16 @@ What you can do here:
   queue, hashtags, config         manage the queue, hashtags and settings
   status, logs, stop              watch and control what is running
 
-Sessions run in the background, so the prompt stays usable while they run.
-Type `help` for the full command list; `quit` (or Ctrl+D) to exit."""
+How it runs:
+  python -m reciproca <comando>   one command in its own process; the browser
+                                  is released when the command ends
+  python -m reciproca (this)      the shell: the browser stays open across
+                                  commands, sessions run in the background and
+                                  the prompt stays usable while they run
+
+A Chrome window left open by a one-shot command locks the profile - close it
+before using the browser here. Type `help` for the full command list; `quit`
+(or Ctrl+D) exits."""
 
 
 def repl(commands=None):
