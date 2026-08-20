@@ -393,10 +393,14 @@ def _search_decision(info):
 
     dialog = tk.Toplevel(root)
     dialog.title("Search Complete")
-    dialog.resizable(False, False)
+    dialog.resizable(True, True)
+    dialog.minsize(520, 230)
     dialog.transient(root)
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose("discard"))
 
+    # The text wraps at a fixed width instead of stretching the window to its
+    # longest line: on odd font metrics the window would otherwise size itself
+    # so wide that the buttons below got pushed off the visible area.
     tk.Label(
         dialog,
         text=(
@@ -407,11 +411,13 @@ def _search_decision(info):
             f"(visible on the Follow tab)."
         ),
         justify='left',
+        wraplength=460,
+        anchor='w',
         padx=18,
         pady=14,
     ).pack()
 
-    buttons = ttk.Frame(dialog, padding=(18, 0, 18, 14))
+    buttons = ttk.Frame(dialog, padding=(18, 4, 18, 14))
     buttons.pack()
     ttk.Button(buttons, text="💾 Save to queue", command=lambda: choose("save_stop")).pack(side='left', padx=4)
     ttk.Button(buttons, text="🚀 Save & follow now", command=lambda: choose("follow")).pack(side='left', padx=4)
