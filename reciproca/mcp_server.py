@@ -329,7 +329,8 @@ def follow_cycle(mode: str = "search", hashtags: list = None,
                  delay_min: int = None, delay_max: int = None,
                  limit: int = None, semantic_weight: int = None,
                  after_search: str = "follow", headless: bool = False,
-                 auto_open: bool = False, login_timeout: int = 300) -> dict:
+                 auto_open: bool = False, login_timeout: int = 300,
+                 score_after_search: bool = True) -> dict:
     """Start one follow session on a worker thread; returns a task_id.
 
     mode "search" scrapes the hashtags first (new candidates), "queue"
@@ -339,6 +340,11 @@ def follow_cycle(mode: str = "search", hashtags: list = None,
     (start following now), "save_stop" (save to queue and stop),
     "discard" (drop the results). `semantic_weight` overrides the saved
     ranking weight (0-100) when given.
+
+    score_after_search runs the semantic scoring pass on the saved results
+    inside this session (default True). Prefer False and a separate
+    `queue_score` call when the scoring is wanted: the follow session then
+    stays short, and the pass is its own observable task.
 
     With auto_open the browser is opened first if it is not already (and the
     login waited for, up to login_timeout seconds); without it, the session
@@ -368,6 +374,7 @@ def follow_cycle(mode: str = "search", hashtags: list = None,
     _launch(task_id, lambda: cycles.follow_cycle(
         mode=mode, delay_min=delay_min, delay_max=delay_max,
         limit=limit, hashtags=hashtags, after_search=after_search,
+        score_after_search=score_after_search,
     ))
     log(f"🚀 Follow session started as task {task_id} ({mode} mode)")
     return _ok(task_id=task_id, kind="follow_cycle")

@@ -22,14 +22,17 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from reciproca import config, hooks, state
 from reciproca.browser import (
     BROWSER_WATCH_INTERVAL,
+    begin_session,
     browser_is_open,
     can_open_browser,
+    end_session,
     handle_browser_closed,
     poll_browser,
     start_browser,
     stop_bot,
 )
 from reciproca.cycles import follow_cycle, unfollow_cycle
+from reciproca.follow import run_scoring_pass
 from reciproca.logging_sink import log, logger, register_sink
 from reciproca.persistence import load_hashtags, save_hashtags
 from reciproca.queue import (
@@ -66,6 +69,8 @@ browser_btn = None
 queue_listbox = None
 queue_entry = None
 queue_count_label = None
+queue_score_label = None
+score_queue_btn = None
 mode_var = None
 main_queue_info = None
 live_extraction_listbox = None
@@ -368,20 +373,53 @@ def reset_unfollow_app():
 
 
 def _search_decision(info):
-    """The askyesnocancel from the monolith, as a follow_cycle decision hook."""
-    result = messagebox.askyesnocancel(
-        "Search Complete",
-        f"Found {info['ranked_count']} unique users from {info['hashtag_count']} hashtag(s).\n"
-        f"Highest frequency: {info['top_freq']} (appeared in {info['top_freq']} authors' followers).\n\n"
-        f"What do you want to do?\n\n"
-        f"• YES: Save to queue and STOP (follow manually later from GUI)\n"
-        f"• NO: Save to queue and START following now\n"
-        f"• CANCEL: Discard results and stop",
-        icon='question'
-    )
-    if result is None:  # CANCEL - discard and stop
-        return "discard"
-    return "save_stop" if result else "follow"
+    """The dialog after a search, as a follow_cycle decision hook.
+
+    Three named buttons rather than a yes/no/cancel: the choices are actions,
+    not answers, so they are labeled as such. The semantic scoring of the top
+    candidates is the common next step and is announced here, because with the
+    scoring decoupled from the follow it is now a phase the user is told about
+    instead of a hidden tail of the session.
+
+    Built on the worker thread follow_cycle calls the hook from, the same
+    place the old askyesnocancel was; wait_window pumps the event loop the
+    same way. Closing the window counts as Discard.
+    """
+    decision = {"value": "discard"}
+
+    def choose(value):
+        decision["value"] = value
+        dialog.destroy()
+
+    dialog = tk.Toplevel(root)
+    dialog.title("Search Complete")
+    dialog.resizable(False, False)
+    dialog.transient(root)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("discard"))
+
+    tk.Label(
+        dialog,
+        text=(
+            f"Found {info['ranked_count']} unique users from {info['hashtag_count']} hashtag(s).\n"
+            f"Highest frequency: {info['top_freq']} (appeared in {info['top_freq']} authors' followers).\n\n"
+            f"Unless you choose Discard, the results are saved to the queue\n"
+            f"and the semantic scoring of the top candidates runs automatically\n"
+            f"(visible on the Follow tab)."
+        ),
+        justify='left',
+        padx=18,
+        pady=14,
+    ).pack()
+
+    buttons = ttk.Frame(dialog, padding=(18, 0, 18, 14))
+    buttons.pack()
+    ttk.Button(buttons, text="💾 Save to queue", command=lambda: choose("save_stop")).pack(side='left', padx=4)
+    ttk.Button(buttons, text="🚀 Save & follow now", command=lambda: choose("follow")).pack(side='left', padx=4)
+    ttk.Button(buttons, text="🗑️ Discard", command=lambda: choose("discard")).pack(side='left', padx=4)
+
+    dialog.grab_set()
+    dialog.wait_window()
+    return decision["value"]
 
 
 def _render_follow_result(result):
@@ -668,6 +706,46 @@ def clear_queue_ui():
         log("🗑️ Queue cleared", 'warning')
 
 
+def score_queue_ui():
+    """Run the semantic scoring pass from the Queue tab, standalone.
+
+    The decoupled entry point: scoring no longer has to ride along on a
+    search session - the queue can be scored any time the browser is open and
+    no session is running. The pass claims the session like any cycle does,
+    so the browser is safe and Stop works; progress shows on the label next
+    to the button.
+    """
+    if state.session_running.is_set():
+        messagebox.showwarning("Session running", "Stop the current session before scoring the queue.")
+        return
+    if state.driver is None:
+        messagebox.showerror("Browser closed", "Open the browser first - scoring reads the candidates' profiles.")
+        return
+    if not begin_session():
+        return
+
+    def worker():
+        try:
+            def on_progress(number, total, username):
+                queue_score_label.config(text=f"🧠 Scoring {number}/{total}: {username}")
+                root.update_idletasks()
+            run_scoring_pass(on_progress=on_progress)
+        except Exception as e:
+            log(f"❌ Scoring error: {e}", 'error')
+            logger.exception("Scoring failed")
+        finally:
+            end_session()
+            queue_score_label.config(text="")
+            score_queue_btn.config(state='normal')
+            refresh_queue_display()
+
+    score_queue_btn.config(state='disabled')
+    queue_score_label.config(text="🧠 Scoring…")
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    state.active_threads.append(thread)
+
+
 def import_queue_from_file():
     """Import users from file."""
     filepath = filedialog.askopenfilename(
@@ -791,6 +869,7 @@ def setup_gui():
     global hashtag_listbox, hashtag_entry, delay_min_entry, delay_max_entry
     global limit_entry, start_btn, stop_btn, browser_btn
     global queue_listbox, queue_entry, queue_count_label, mode_var, main_queue_info
+    global queue_score_label, score_queue_btn
     global live_extraction_listbox, live_extraction_label
     global uf_data_label, uf_delay_min_entry, uf_delay_max_entry, uf_limit_entry
     global uf_progress_bar, uf_status_label, uf_stats_label, uf_start_btn, uf_stop_btn
@@ -1277,6 +1356,16 @@ def setup_gui():
     ttk.Button(queue_ctrl_frame, text='➕ Add', command=add_to_queue_ui).pack(side='left', padx=2)
     ttk.Button(queue_ctrl_frame, text='➖ Remove', command=remove_from_queue_ui).pack(side='left', padx=2)
     ttk.Button(queue_ctrl_frame, text='🔄 Refresh', command=refresh_queue_display).pack(side='left', padx=2)
+    score_queue_btn = ttk.Button(queue_ctrl_frame, text='🧠 Score Queue', command=score_queue_ui)
+    score_queue_btn.pack(side='left', padx=(12, 2))
+    ToolTip(score_queue_btn, "Score the best candidates against your niche (semantic ranking)")
+
+    # Scoring status line - the Queue tab's own place for the scoring phase,
+    # so a pass started from here is visible without switching tabs.
+    queue_score_frame = ttk.Frame(queue_tab)
+    queue_score_frame.pack(fill='x', pady=(0, 10))
+    queue_score_label = ttk.Label(queue_score_frame, text="")
+    queue_score_label.pack(side='left')
 
     # Import/Export buttons
     queue_io_frame = ttk.Frame(queue_tab)

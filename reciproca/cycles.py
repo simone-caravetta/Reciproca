@@ -38,7 +38,8 @@ from reciproca.utils import brief_error
 
 
 def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
-                 hashtags=None, after_search="follow", decision_hook=None):
+                 hashtags=None, after_search="follow", decision_hook=None,
+                 score_after_search=True):
     """Run one follow session, queue or search mode.
 
     `mode` "queue" follows from the saved queue; "search" scrapes the hashtags
@@ -49,8 +50,15 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
     results is asked: if `decision_hook` is given it is called with
     {"ranked_count", "top_freq", "hashtag_count"} and must return one of
     "follow" | "save_stop" | "discard"; otherwise `after_search` is used
-    directly. The GUI passes a hook wrapping its askyesnocancel; the CLI and
-    MCP pass the flag.
+    directly. The GUI passes a hook wrapping its dialog; the CLI and MCP pass
+    the flag.
+
+    `score_after_search` says whether the semantic scoring pass runs on the
+    saved results inside this session (the GUI's flow: score right after the
+    search, visible on the Follow tab). With it off, the queue keeps its
+    current order and scoring is a separate pass - `queue score` in the CLI,
+    `queue_score` in MCP, the Queue tab's button in the GUI - so a follow
+    session never drags the profile reads along.
 
     Returns {"ok", "error", "report", "mode", "ranked_count", "top_freq",
     "followed", "queue_remaining", "added", "branch"}. "ok" is True whenever
@@ -164,12 +172,15 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
             #
             # Both answers that keep the results get scored, including the one that
             # follows straight away - which is the whole point, since that is the
-            # run whose order the scoring changes.
-            try:
-                run_scoring_pass(after_stop=state.stop_requested.is_set())
-            except Exception as e:
-                log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
-                logger.exception("The scoring pass failed")
+            # run whose order the scoring changes. The GUI keeps this on (the pass
+            # is a visible phase on the Follow tab); CLI and MCP can switch it off
+            # with score_after_search=False and score through their own commands.
+            if score_after_search:
+                try:
+                    run_scoring_pass(after_stop=state.stop_requested.is_set())
+                except Exception as e:
+                    log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
+                    logger.exception("The scoring pass failed")
 
             if decision == "save_stop":  # YES - Save to queue and STOP
                 log("🛑 Scraping complete. Start following manually when ready.", 'success')

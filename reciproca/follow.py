@@ -351,7 +351,7 @@ def read_candidate_profile(username):
     return None, None, profile_description(header_text)
 
 
-def run_scoring_pass(after_stop=False):
+def run_scoring_pass(after_stop=False, on_progress=None):
     """Hold the queue to size, then read and score everyone left in it.
 
     Runs at the end of a search rather than during a follow session. The browser is
@@ -363,6 +363,12 @@ def run_scoring_pass(after_stop=False):
     that queue wants sorting as much as a finished one does - more, really, since it
     is the one about to be worked through. So the pass gets its own stop flag and
     clears it here, and the next press of Stop is what ends the scoring as well.
+
+    `on_progress` is an extra per-profile callback for the caller (the GUI's
+    Queue-tab button reports to its own label through it). The default reporting
+    always happens as well: a log line every 25th profile, and the progress hooks
+    - which the GUI renders as a visible scoring phase on the Follow tab, and
+    headless frontends ignore.
 
     Every way of not being able to score leaves the queue ordered on sighting counts
     alone, which is what it was ordered on before any of this existed. None of them
@@ -398,11 +404,14 @@ def run_scoring_pass(after_stop=False):
             'info'
         )
 
-    def on_progress(number, total, username):
+    def _report_progress(number, total, username):
         if number == 1 or number % 25 == 0:
             log(f"🧭 Scoring {number}/{total}...", 'info')
+        hooks.update_progress(number, total, phase="Scoring")
+        if on_progress is not None:
+            on_progress(number, total, username)
 
-    scored = score_queue(scorer, on_progress=on_progress)
+    scored = score_queue(scorer, on_progress=_report_progress)
     if scored:
         log(f"🧭 Scored {scored} profiles against your niche", 'success')
 

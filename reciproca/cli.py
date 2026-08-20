@@ -298,6 +298,7 @@ def cmd_follow(args):
                 limit=args.limit,
                 hashtags=args.hashtags,
                 after_search=args.after_search,
+                score_after_search=not args.no_score,
             )
             _print_result(result, args.json)
             return 0 if result.get("ok") else 1
@@ -317,6 +318,7 @@ def cmd_follow(args):
                 limit=args.limit,
                 hashtags=args.hashtags,
                 after_search=args.after_search,
+                score_after_search=not args.no_score,
                 decision_hook=_shell_decision,
             )
             _print_result(result, args.json)
@@ -812,6 +814,9 @@ Examples:
     f.add_argument("--after-search", choices=["follow", "save_stop", "discard"], default="follow",
                    help="what to do with the ranked results when the search ends "
                         "(default follow; save_stop = add them to the queue and stop)")
+    f.add_argument("--no-score", action="store_true",
+                   help="skip the semantic scoring pass after a search - the queue "
+                        "keeps its current order, and `queue score` scores it later")
     f.add_argument("--headless", action="store_true")
     f.add_argument("--login-timeout", type=int, default=300, help="seconds to wait for the login (default 300)")
     f.add_argument("--json", action="store_true", help="print the session result as JSON")

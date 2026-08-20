@@ -95,7 +95,8 @@ class MCPToolTest(unittest.TestCase):
         props = set(tools["follow_cycle"].input_schema.get("properties", {}))
         self.assertLessEqual(
             {"mode", "hashtags", "delay_min", "delay_max", "limit",
-             "semantic_weight", "after_search", "headless", "auto_open"},
+             "semantic_weight", "after_search", "headless", "auto_open",
+             "score_after_search"},
             props,
         )
 
@@ -416,18 +417,20 @@ class MCPAsyncTaskTest(unittest.TestCase):
 
         def stub(mode="search", **kwargs):
             captured["mode"] = mode
+            captured["score_after_search"] = kwargs.get("score_after_search")
             return {"ok": True, "error": None, "report": "done", "mode": mode,
                     "ranked_count": 3, "top_freq": 0.5, "followed": 2,
                     "queue_remaining": 5, "added": 3, "branch": "follow"}
 
         ms.cycles.follow_cycle = stub
 
-        started = ms.follow_cycle(mode="queue", limit=10)
+        started = ms.follow_cycle(mode="queue", limit=10, score_after_search=False)
         self.assertTrue(started["ok"])
         task_id = started["task_id"]
-        self.assertEqual(captured["mode"], "queue")
 
         snapshot = self.wait_done(task_id)
+        self.assertEqual(captured["mode"], "queue")
+        self.assertFalse(captured["score_after_search"])
         self.assertEqual(snapshot["result"]["followed"], 2)
         self.assertEqual(snapshot["result"]["branch"], "follow")
         self.assertIsInstance(snapshot["last_logs"], list)
