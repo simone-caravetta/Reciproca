@@ -252,36 +252,51 @@ def parse_follower_count(text):
 # ---------------------------
 # RETRY DECORATOR
 # ---------------------------
-def retry(max_attempts=config.CONFIG["RETRY_ATTEMPTS"], backoff=config.CONFIG["RETRY_BACKOFF"]):
-    """Decorator for retry logic with exponential backoff."""
+def retry(max_attempts=None, backoff=None):
+    """Decorator for retry logic with exponential backoff.
+
+    The settings are read at call time, not import time: a long-lived process
+    honours a RETRY_ATTEMPTS / RETRY_BACKOFF change without a restart.
+    """
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
+            attempts = config.CONFIG["RETRY_ATTEMPTS"] if max_attempts is None else max_attempts
+            bf = config.CONFIG["RETRY_BACKOFF"] if backoff is None else backoff
+            for attempt in range(attempts):
                 try:
                     return func(*args, **kwargs)
                 except (TimeoutException, StaleElementReferenceException) as e:
-                    if attempt == max_attempts - 1:
+                    if attempt == attempts - 1:
                         raise
-                    wait_time = backoff ** attempt
-                    logger.warning(f"Retry {func.__name__} in {wait_time}s: {e}")
+                    wait_time = bf ** attempt
+                    # Type only: Selenium's TimeoutException str() carries the
+                    # server stacktrace, which is noise at this level - the
+                    # detail is in follow_bot.log if it is ever needed.
+                    logger.warning(f"Retry {func.__name__} in {wait_time}s: {type(e).__name__}")
                     time.sleep(wait_time)
             return None
         return wrapper
     return decorator
 
 
+def _resolved_timeout(timeout):
+    """The caller's timeout, or the config's - read at call time, not at
+    import, so a long-lived process honours a BROWSER_TIMEOUT change."""
+    return config.CONFIG["BROWSER_TIMEOUT"] if timeout is None else timeout
+
+
 @retry()
-def wait_for_element(driver, by, value, timeout=config.CONFIG["BROWSER_TIMEOUT"]):
+def wait_for_element(driver, by, value, timeout=None):
     """Wait for element to be present."""
-    wait = WebDriverWait(driver, timeout)
+    wait = WebDriverWait(driver, _resolved_timeout(timeout))
     return wait.until(EC.presence_of_element_located((by, value)))
 
 
 @retry()
-def wait_for_clickable(driver, by, value, timeout=config.CONFIG["BROWSER_TIMEOUT"]):
+def wait_for_clickable(driver, by, value, timeout=None):
     """Wait for element to be clickable."""
-    wait = WebDriverWait(driver, timeout)
+    wait = WebDriverWait(driver, _resolved_timeout(timeout))
     return wait.until(EC.element_to_be_clickable((by, value)))
 
 

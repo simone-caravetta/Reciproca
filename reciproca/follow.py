@@ -291,6 +291,24 @@ def profile_bot_reason():
     return reason
 
 
+def _dead_profile_page(driver):
+    """True when the open page is Instagram's 'profile unavailable' answer.
+
+    Deleted, renamed and suspended accounts all land here, as does the
+    rate-limit page. The marker lives in a heading, which keeps a live
+    profile whose bio happens to contain one of these phrases safe.
+    """
+    for tag in ("h1", "h2"):
+        for element in driver.find_elements(By.TAG_NAME, tag):
+            text = (element.text or "").lower()
+            if any(m in text for m in (
+                "isn't available", "not available", "suspended",
+                "temporarily unavailable", "wait a few minutes",
+            )):
+                return True
+    return False
+
+
 def read_candidate_profile(username):
     """Open a candidate's profile and read what it says about itself.
 
@@ -308,7 +326,19 @@ def read_candidate_profile(username):
 
     try:
         state.driver.get(f"https://www.instagram.com/{username}/")
-        wait_for_element(state.driver, By.TAG_NAME, "header")
+
+        # A dead profile would have the old header wait burn two full
+        # BROWSER_TIMEOUT attempts - ~30s and a wall of retry warnings per
+        # candidate. Poll once for both signals instead: the header marks a
+        # live profile, the "isn't available" heading marks a dead one, and
+        # either one renders in well under a second.
+        deadline = time.monotonic() + config.CONFIG["BROWSER_TIMEOUT"]
+        while (time.monotonic() < deadline
+               and not state.driver.find_elements(By.TAG_NAME, "header")):
+            if _dead_profile_page(state.driver):
+                logger.info(f"{username} no longer exists, leaving it unscored")
+                return nothing
+            time.sleep(0.25)
 
         # Instagram answers a visit to some profiles with a page of suggestions.
         # Reading that would score this candidate on a stranger's bio.
