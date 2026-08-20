@@ -988,7 +988,7 @@ REPL_BANNER = f"""
                        ▙▄▘▞▀▖▞▀▖▄ ▛▀▖▙▀▖▞▀▖▞▀▖▝▀▖
                        ▌▚ ▛▀ ▌ ▖▐ ▙▄▘▌  ▌ ▌▌ ▖▞▀▌
                        ▘ ▘▝▀▘▝▀ ▀▘▌  ▘  ▝▀ ▝▀ ▝▀▘
-──────────── ✦ The Instagram follow & unfollow assistant. ✦ ────────────
+─────────────── ✦ Automate your Instagram interactions ✦ ───────────────
 
 {_y}What you can do here:{_r}
   {_g}browser open / close / status{_r}   manage Chrome (log in with your account)
