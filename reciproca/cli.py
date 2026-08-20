@@ -15,7 +15,6 @@ reciproca`) runs the same shell as a script.
 Command tree:
 
     browser open [--headless] | close | status
-    login wait [--timeout N]   (opens the browser too, if it is not open)
     follow [--mode queue|search] [--hashtags a,b] [--delay-min M]
            [--delay-max M] [--limit N] [--after-search follow|save-stop|discard]
            [--headless] [--login-timeout N]
@@ -119,7 +118,14 @@ def cmd_browser_open(args):
         print("✅ Browser open and logged in.")
         print("   Chrome stays open for interactive use - close the window when done.")
     else:
-        print("✅ Browser open. Log in (or confirm the session), then `login wait`.")
+        # The login is detected by the watcher thread; the shell is still
+        # alive to see it, a one-shot process is not. Say what to do for each.
+        if _interactive:
+            print("✅ Browser open. Log in to Instagram in the Chrome window -")
+            print("   this session picks the login up on its own (`status` confirms it).")
+        else:
+            print("✅ Browser open. Log in to Instagram in the Chrome window,")
+            print("   then close it: the next command re-opens Chrome with the login saved.")
     return 0
 
 
@@ -156,32 +162,6 @@ def cmd_browser_status(args):
         print(f"Logged in: {'yes' if status['logged_in'] else 'no'}")
         print(f"Session running: {'yes' if status['session_running'] else 'no'}")
         print(f"Rate limited: {'yes' if status['rate_limited'] else 'no'}")
-    return 0
-
-
-def cmd_login_wait(args):
-    if state.driver is None:
-        # A fresh process has no driver and cannot see a browser an earlier
-        # command opened - the login flag dies with the process that set it.
-        # Open the browser here and wait for the login in this same process.
-        ok, error = ensure_browser(False, args.timeout)
-        if not ok:
-            print(f"✗ {error}", file=sys.stderr)
-            return 1
-        # A setup command: the login is saved in chrome_profile/, so the
-        # browser can go. The next command re-opens and re-detects it.
-        browser.handle_browser_closed()
-        print("✅ Logged in.")
-        return 0
-    if not wait_for_login(args.timeout):
-        print(
-            "Login did not complete. Open a visible browser and log in to Instagram:\n"
-            "    python -m reciproca browser open\n"
-            "Headless sessions reuse the login saved in chrome_profile/ from a visible one.",
-            file=sys.stderr,
-        )
-        return 1
-    print("✅ Logged in.")
     return 0
 
 
@@ -746,12 +726,6 @@ def build_parser():
     bs.add_argument("--json", action="store_true")
     bs.set_defaults(handler=cmd_browser_status)
 
-    l = sub.add_parser("login", help="wait for the login to be in place")
-    ll = l.add_subparsers(dest="login_command", required=True)
-    lw = ll.add_parser("wait", help="poll until the login form goes away (or timeout)")
-    lw.add_argument("--timeout", type=int, default=300, help="seconds to wait (default 300)")
-    lw.set_defaults(handler=cmd_login_wait)
-
     f = sub.add_parser("follow", help="run one follow session")
     f.add_argument("--mode", choices=["queue", "search"], default="search",
                    help="queue = work the saved queue, search = hashtags first (default search)")
@@ -986,22 +960,26 @@ def repl(commands=None):
 
 def main(argv=None):
     if argv is None:
-        # No arguments: an interactive shell when on a terminal, a scripted
-        # session when stdin is a pipe. Either way one process owns the
-        # browser for the whole session.
-        if sys.stdin.isatty():
-            return repl()
-        return repl(commands=iter(sys.stdin))
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    try:
-        return args.handler(args)
-    except KeyboardInterrupt:
-        print("\nInterrupted.")
-        return 130
-    except Exception as e:
-        print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
-        return 1
+        argv = sys.argv[1:]
+    if argv:
+        # One-shot: each invocation is one command in its own process, which
+        # owns the browser for that command and releases it afterwards.
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        try:
+            return args.handler(args)
+        except KeyboardInterrupt:
+            print("\nInterrupted.")
+            return 130
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+    # No arguments: an interactive shell when on a terminal, a scripted
+    # session when stdin is a pipe. Either way one process owns the
+    # browser for the whole session.
+    if sys.stdin.isatty():
+        return repl()
+    return repl(commands=iter(sys.stdin))
 
 
 if __name__ == "__main__":
