@@ -865,10 +865,17 @@ def build_parser():
     return parser
 
 
-REPL_BANNER = """Reciproca interactive shell - one process, the browser stays open
-between commands. `browser open` followed by `follow` drives the same Chrome.
-Sessions run in the background: `status` and `stop` work while they run.
-Same commands as the CLI; `help` lists them, `quit` (or Ctrl+D) exits."""
+REPL_BANNER = """Welcome to Reciproca - the Instagram follow & unfollow assistant.
+
+What you can do here:
+  browser open / close / status   manage Chrome (log in with your account)
+  follow                          extract from your hashtags, then follow
+  unfollow                        unfollow accounts that do not follow you back
+  queue, hashtags, config         manage the queue, hashtags and settings
+  status, logs, stop              watch and control what is running
+
+Sessions run in the background, so the prompt stays usable while they run.
+Type `help` for the full command list; `quit` (or Ctrl+D) to exit."""
 
 
 def repl(commands=None):
