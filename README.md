@@ -2,8 +2,11 @@
 
 # Reciproca
 
-Desktop tool (Python, Tkinter, Selenium) for **testing growth strategies** on your own
-Instagram account and **managing** the follow relationships they produce.
+Python tool for **testing growth strategies** on your own Instagram account
+and **managing** the follow relationships they produce. It comes as a
+command-line interface (`python -m reciproca`) and a Tkinter desktop GUI
+(`python -m reciproca.gui`) over the same core: Selenium drives an ordinary
+Chrome window.
 
 Everything runs on your own machine: no account to create, no API key, no third-party
 service in the middle. You log into Instagram yourself, in an ordinary Chrome window
@@ -37,15 +40,45 @@ plausibly do by hand, which is the point.
 
 ```bash
 pip install -r requirements.txt
-python reciproca.py
 ```
 
 Google Chrome must be installed; `webdriver-manager` downloads the matching
 ChromeDriver on first run.
 
+Two interfaces share the same core, the same files and the same Chrome
+profile, and can be used interchangeably:
+
+- **Command line** - `python -m reciproca` starts the interactive shell:
+  the browser stays open across commands, sessions run in the background
+  and the prompt stays usable while they run. Every command also works on
+  its own in one process: `python -m reciproca status`.
+- **Graphical interface** - `python -m reciproca.gui` (or `python gui.py`)
+  opens the five-tab desktop app.
+
+Both read and write the same queue, history, settings, login profile and
+logs, so a session started from one can be inspected or continued from the
+other. A Chrome window left open by a one-shot command locks the profile
+until the window is closed.
+
 Reciproca downloads a little Embedding Model at runtime the first time you
 execute the Semantic Evaluation. You can find the same model under:
 "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+
+## Command line
+
+`python -m reciproca` with no arguments opens the shell; `help` lists the
+commands and `help <command>` explains one in full (start with `help follow`,
+the most complex one):
+
+    browser open / close / status   manage Chrome (log in with your account)
+    follow                          extract from your hashtags, then follow
+    unfollow                        unfollow accounts that do not follow you back
+    queue, hashtags, config         manage the queue, hashtags and settings
+    status, logs, stop              watch and control what is running
+
+Each command also runs as a one-shot: `python -m reciproca follow --mode
+search --limit 10` runs one session and releases the browser when it ends,
+so it can be scheduled or chained from scripts.
 
 ## Follow
 
@@ -65,6 +98,11 @@ thousands) are skipped and dropped from the queue; the thresholds are under
 
 Each hashtag prefers authors it has never scraped, so repeated runs on the same tag
 keep finding new people instead of the same few.
+
+The same flows exist in the CLI: `follow` is the Auto Follow tab
+(`--mode search` for Deep Search, `--mode queue` for Follow from Queue) and
+`unfollow run` is the Unfollow tab - `help follow` and `help unfollow` walk
+through each one.
 
 ## Unfollow
 
@@ -111,10 +149,13 @@ embedding multi language model that runs on your ram and cpu (150-200mb).
 
 Instagram renders its interface in the account's own language, so Reciproca matches
 button and warning text per locale. **Currently supported: English and Italian.**
-Every locale string lives in one block at the top of `reciproca.py`, so adding a
+Every locale string lives in one block, `reciproca/markers.py`, so adding a
 language means editing that block and nothing else.
 
 ## Windows executable
+
+> Not yet ported: `build.bat`/`reciproca.spec` still target the old
+> single-file `reciproca.py` and do not work with the package layout yet.
 
 PyInstaller cannot cross-compile, so build on Windows:
 
