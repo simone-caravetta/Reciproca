@@ -28,6 +28,7 @@ Command tree:
     status [--json]
     logs [--tail N] [--follow]
     stop
+    help [topic]
 """
 import argparse
 import json
@@ -723,14 +724,45 @@ def cmd_stop(_args):
 # parser
 # ---------------------------------------------------------------------------
 
+def _subparser(parser, name):
+    """The subparser for a command name, or None when there is no such command."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices.get(name)
+    return None
+
+
+def cmd_help(args):
+    """The command list, or one command's full manual."""
+    if not args.topic:
+        args._parser.print_help()
+        return 0
+    sub = _subparser(args._parser, args.topic)
+    if sub is None:
+        print(f"No such command: {args.topic}", file=sys.stderr)
+        print("Type `help` for the command list.", file=sys.stderr)
+        return 1
+    print(sub.format_help())
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="reciproca",
         description="Follow & unfollow bot - the same core the GUI runs, from the terminal.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser("browser", help="open, close or inspect the Chrome session")
+    b = sub.add_parser(
+        "browser", help="open, close or inspect the Chrome session",
+        description="""The Chrome session on the saved profile. `open` shows Chrome and
+waits for the login; `close` ends the session; `status` probes whether it is
+open, logged in or rate limited. A one-shot `open` leaves the window running
+and locks the profile until the window is closed - the shell keeps the same
+browser across commands instead.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     bb = b.add_subparsers(dest="browser_command", required=True)
     bo = bb.add_parser("open", help="open Chrome on the saved profile")
     bo.add_argument("--headless", action="store_true", help="no window - needs a login saved in chrome_profile/")
@@ -740,7 +772,37 @@ def build_parser():
     bs.add_argument("--json", action="store_true")
     bs.set_defaults(handler=cmd_browser_status)
 
-    f = sub.add_parser("follow", help="run one follow session")
+    f = sub.add_parser(
+        "follow", help="run one follow session",
+        description="""Follow users from the saved queue or from your hashtags, one at a
+time, with the configured delays and the bot filter on each profile.
+
+The two --mode values:
+  queue    work the saved queue (follow_queue.json), in rank order
+  search   scrape the saved hashtags first (or --hashtags), rank the
+           authors by niche affinity and sighting frequency, then decide
+           what to do with them (see --after-search) and follow
+
+The flow of a search session:
+  1. open Chrome (or reuse the shell's) and wait for the login
+  2. scrape each hashtag's recent posts and collect the authors
+  3. rank the candidates by affinity and frequency
+  4. ask the after-search tri-state: in the shell it appears at the
+     prompt - [f]ollow now / [s]ave to queue and stop / [d]iscard;
+     one-shot runs use --after-search instead
+  5. follow the strongest candidates, checking each profile against the
+     bot filter first""",
+        epilog="""Delays, limits and filters come from bot_config.json unless a flag
+overrides them here. In the shell, `status` and `stop` keep working while
+the session runs; from another terminal, `python -m reciproca stop` halts
+it at its next checkpoint.
+
+Examples:
+  reciproca follow --mode queue --limit 5
+  reciproca follow --mode search --hashtags photography,street
+  reciproca follow --mode search --after-search save_stop""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     f.add_argument("--mode", choices=["queue", "search"], default="search",
                    help="queue = work the saved queue, search = hashtags first (default search)")
     f.add_argument("--hashtags", help="comma-separated list; defaults to the saved hashtags")
@@ -755,7 +817,18 @@ def build_parser():
     f.add_argument("--json", action="store_true", help="print the session result as JSON")
     f.set_defaults(handler=cmd_follow)
 
-    u = sub.add_parser("unfollow", help="load exports, run an unfollow session, inspect progress")
+    u = sub.add_parser(
+        "unfollow", help="load exports, run an unfollow session, inspect progress",
+        description="""Unfollow accounts that do not follow you back. The account list
+comes from the Instagram data download's JSON exports; progress is saved,
+so a stopped session resumes where it left off.
+
+  load F1 F2   read the followers.json and following.json exports
+  run          walk the non-followers list, one by one, with delays
+  status       how many are left
+  reset        discard the saved progress""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     uu = u.add_subparsers(dest="unfollow_command", required=True)
     ul = uu.add_parser("load", help="load the followers/following JSON exports")
     ul.add_argument("followers", help="the followers.json export path")
@@ -776,7 +849,19 @@ def build_parser():
     ures.add_argument("--yes", action="store_true", help="skip the confirmation")
     ures.set_defaults(handler=cmd_unfollow_reset)
 
-    q = sub.add_parser("queue", help="inspect and edit the follow queue")
+    q = sub.add_parser(
+        "queue", help="inspect and edit the follow queue",
+        description="""The follow queue: who to follow next, in rank order. The same file
+the GUI uses.
+
+  list / rank      show it (rank also shows each entry's affinity score)
+  add / remove / clear   edit it (your own account is filtered out)
+  score            read the candidates' profiles and rescore by niche
+                   affinity (slow: a page load per candidate)
+  trim             keep only the top entries
+  import / export  read or write a .json or .txt file""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     qq = q.add_subparsers(dest="queue_command", required=True)
     ql = qq.add_parser("list", help="the queue in rank order")
     ql.add_argument("--limit", type=int)
@@ -809,7 +894,11 @@ def build_parser():
     qe.add_argument("file")
     qe.set_defaults(handler=cmd_queue_export)
 
-    h = sub.add_parser("hashtags", help="manage the saved hashtags")
+    h = sub.add_parser(
+        "hashtags", help="manage the saved hashtags",
+        description="""The saved hashtag list that follow's search mode scrapes.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     hh = h.add_subparsers(dest="hashtags_command", required=True)
     ha = hh.add_parser("add", help="add hashtags (with or without the #)")
     ha.add_argument("tags", nargs="+")
@@ -824,7 +913,13 @@ def build_parser():
     hc.add_argument("--yes", action="store_true")
     hc.set_defaults(handler=cmd_hashtags_clear)
 
-    c = sub.add_parser("config", help="read and write the settings")
+    c = sub.add_parser(
+        "config", help="read and write the settings",
+        description="""Read or change bot_config.json (delays, limits, filters). `get`
+shows one key or everything, `set` writes one value (numbers and booleans
+are converted), `reset` restores the defaults.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     cc = c.add_subparsers(dest="config_command", required=True)
     cg = cc.add_parser("get", help="one key, or every key without one")
     cg.add_argument("key", nargs="?")
@@ -838,17 +933,41 @@ def build_parser():
     cr.add_argument("--yes", action="store_true")
     cr.set_defaults(handler=cmd_config_reset)
 
-    s = sub.add_parser("status", help="browser, session, queue, hashtags, unfollow, last stats")
+    s = sub.add_parser(
+        "status", help="browser, session, queue, hashtags, unfollow, last stats",
+        description="""The whole app in one glance: browser, login, running session,
+queue, hashtags, unfollow progress and the last session's stats.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     s.add_argument("--json", action="store_true")
     s.set_defaults(handler=cmd_status)
 
-    lo = sub.add_parser("logs", help="the recent log lines")
+    lo = sub.add_parser(
+        "logs", help="the recent log lines",
+        description="""The session history (follow_bot.log). --tail N shows the last N
+lines; --follow keeps printing new lines as they are written (tail -f).""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     lo.add_argument("--tail", type=int, default=50, help="how many lines (default 50)")
     lo.add_argument("--follow", action="store_true", help="keep printing new lines until Ctrl+C")
     lo.set_defaults(handler=cmd_logs)
 
-    st = sub.add_parser("stop", help="ask any running session to stop (works across processes)")
+    st = sub.add_parser(
+        "stop", help="ask any running session to stop (works across processes)",
+        description="""Ask any running session to stop: this process, or another one
+through the stop.flag file that every cycle checks at each pause checkpoint.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     st.set_defaults(handler=cmd_stop)
+
+    hp = sub.add_parser(
+        "help", help="the command list, or one command's manual",
+        description="""The command list without a topic; with a topic, that command's
+full manual, e.g. `help follow`.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    hp.add_argument("topic", nargs="?", help="a command name (follow, browser, queue, ...)")
+    hp.set_defaults(handler=cmd_help)
 
     return parser
 
@@ -870,8 +989,8 @@ How it runs:
                                   the prompt stays usable while they run
 
 A Chrome window left open by a one-shot command locks the profile - close it
-before using the browser here. Type `help` for the full command list; `quit`
-(or Ctrl+D) exits."""
+before using the browser here. Type `help` for the command list, `help
+<comando>` for one command's manual; `quit` (or Ctrl+D) exits."""
 
 
 def repl(commands=None):
@@ -949,6 +1068,7 @@ def repl(commands=None):
                 continue
             try:
                 args = parser.parse_args(shlex.split(line))
+                args._parser = parser
             except SystemExit:
                 continue  # argparse already printed the error
             except Exception as e:
@@ -988,6 +1108,7 @@ def main(argv=None):
         # owns the browser for that command and releases it afterwards.
         parser = build_parser()
         args = parser.parse_args(argv)
+        args._parser = parser
         try:
             return args.handler(args)
         except KeyboardInterrupt:
