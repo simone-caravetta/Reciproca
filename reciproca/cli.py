@@ -972,34 +972,49 @@ full manual, e.g. `help follow`.""",
     return parser
 
 
-REPL_BANNER = """
-✦══════════════════════════════════════════════════════════════════════════✦
-########  ########  ######  #### ########  ########   #######   ######
-##     ## ##       ##    ##  ##  ##     ## ##     ## ##     ## ##    ##
-##     ## ##       ##        ##  ##     ## ##     ## ##     ## ##
-########  ######   ##        ##  ########  ########  ##     ## ##
-##   ##   ##       ##        ##  ##        ##   ##   ##     ## ##
-##    ##  ##       ##    ##  ##  ##        ##    ##  ##     ## ##    ##
-##     ## ########  ######  #### ##        ##     ##  #######   ######
-──────────── ✦ The Instagram follow & unfollow assistant. ✦ ────────────
+# ANSI colors for the startup banner; empty strings when stdout is not a
+# terminal, so piped runs (scripts, tests) stay plain.
+_CYAN = "\033[96m"
+_GREEN = "\033[92m"
+_YELLOW = "\033[93m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+if sys.stdout.isatty():
+    _c, _g, _y, _b, _r = _CYAN, _GREEN, _YELLOW, _BOLD, _RESET
+else:
+    _c = _g = _y = _b = _r = ""
 
-What you can do here:
-  browser open / close / status   manage Chrome (log in with your account)
-  follow                          extract from your hashtags, then follow
-  unfollow                        unfollow accounts that do not follow you back
-  queue, hashtags, config         manage the queue, hashtags and settings
-  status, logs, stop              watch and control what is running
+REPL_BANNER = f"""
+{_c}✦══════════════════════════════════════════════════════════════════════════✦{_r}
+{_c}########  ########  ######  #### ########  ########   #######   ######{_r}
+{_c}##     ## ##       ##    ##  ##  ##     ## ##     ## ##     ## ##    ##{_r}
+{_c}##     ## ##       ##        ##  ##     ## ##     ## ##     ## ##{_r}
+{_c}########  ######   ##        ##  ########  ########  ##     ## ##{_r}
+{_c}##   ##   ##       ##        ##  ##        ##   ##   ##     ## ##{_r}
+{_c}##    ##  ##       ##    ##  ##  ##        ##    ##  ##     ## ##    ##{_r}
+{_c}##     ## ########  ######  #### ##        ##     ##  #######   ######{_r}
+──────────── ✦ {_b}The Instagram follow & unfollow assistant.{_r} ✦ ────────────
 
-How it runs:
-  python -m reciproca <comando>   one command in its own process; the browser
+{_y}{_b}What you can do here:{_r}
+  {_g}browser open / close / status{_r}   manage Chrome (log in with your account)
+  {_g}follow{_r}                          extract from your hashtags, then follow
+  {_g}unfollow{_r}                        unfollow accounts that do not follow you back
+  {_g}queue, hashtags, config{_r}         manage the queue, hashtags and settings
+  {_g}status, logs, stop{_r}              watch and control what is running
+
+{_y}{_b}How it runs:{_r}
+  {_g}python -m reciproca <comando>{_r}   one command in its own process; the browser
                                   is released when the command ends
-  python -m reciproca (this)      the shell: the browser stays open across
+  {_g}python -m reciproca (this){_r}      the shell: the browser stays open across
                                   commands, sessions run in the background and
                                   the prompt stays usable while they run
 
-A Chrome window left open by a one-shot command locks the profile - close it
-before using the browser here. Type `help` for the command list, `help
-<comando>` for one command's manual; `quit` (or Ctrl+D) exits."""
+{_y}{_b}Good to know:{_r}
+  {_y}• A one-shot command's Chrome window locks the profile until you close it.{_r}
+  {_y}• `help` shows the full command list.{_r}
+  {_y}• `help <comando>` shows one command's manual.{_r}
+  {_y}• `quit` (or Ctrl+D) exits.{_r}
+"""
 
 
 def repl(commands=None):
