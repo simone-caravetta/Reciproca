@@ -974,39 +974,37 @@ full manual, e.g. `help follow`.""",
 
 # ANSI colors for the startup banner; empty strings when stdout is not a
 # terminal, so piped runs (scripts, tests) stay plain.
-_CYAN = "\033[96m"
 _GREEN = "\033[92m"
 _YELLOW = "\033[93m"
-_BOLD = "\033[1m"
 _RESET = "\033[0m"
 if sys.stdout.isatty():
-    _c, _g, _y, _b, _r = _CYAN, _GREEN, _YELLOW, _BOLD, _RESET
+    _g, _y, _r = _GREEN, _YELLOW, _RESET
 else:
-    _c = _g = _y = _b = _r = ""
+    _g = _y = _r = ""
 
 REPL_BANNER = f"""
-{_c}✦══════════════════════════════════════════════════════════════════════════✦{_r}
-{_c}                       ▛▀▖      ▗{_r}
-{_c}                       ▙▄▘▞▀▖▞▀▖▄ ▛▀▖▙▀▖▞▀▖▞▀▖▝▀▖{_r}
-{_c}                       ▌▚ ▛▀ ▌ ▖▐ ▙▄▘▌  ▌ ▌▌ ▖▞▀▌{_r}
-{_c}                       ▘ ▘▝▀▘▝▀ ▀▘▌  ▘  ▝▀ ▝▀ ▝▀▘{_r}
-──────────── ✦ {_b}The Instagram follow & unfollow assistant.{_r} ✦ ────────────
+✦══════════════════════════════════════════════════════════════════════════✦
+                       ▛▀▖      ▗
+                       ▙▄▘▞▀▖▞▀▖▄ ▛▀▖▙▀▖▞▀▖▞▀▖▝▀▖
+                       ▌▚ ▛▀ ▌ ▖▐ ▙▄▘▌  ▌ ▌▌ ▖▞▀▌
+                       ▘ ▘▝▀▘▝▀ ▀▘▌  ▘  ▝▀ ▝▀ ▝▀▘
+──────────── ✦ The Instagram follow & unfollow assistant. ✦ ────────────
 
-{_y}{_b}What you can do here:{_r}
+{_y}What you can do here:{_r}
   {_g}browser open / close / status{_r}   manage Chrome (log in with your account)
   {_g}follow{_r}                          extract from your hashtags, then follow
   {_g}unfollow{_r}                        unfollow accounts that do not follow you back
   {_g}queue, hashtags, config{_r}         manage the queue, hashtags and settings
   {_g}status, logs, stop{_r}              watch and control what is running
 
-{_y}{_b}How it runs:{_r}
+{_y}How it runs:{_r}
   {_g}python -m reciproca <comando>{_r}   one command in its own process; the browser
                                   is released when the command ends
   {_g}python -m reciproca (this){_r}      the shell: the browser stays open across
                                   commands, sessions run in the background and
                                   the prompt stays usable while they run
 
-{_y}{_b}Good to know:{_r}
+{_y}Good to know:{_r}
   {_y}• A one-shot command's Chrome window locks the profile until you close it.{_r}
   {_y}• `help` shows the full command list.{_r}
   {_y}• `help <comando>` shows one command's manual.{_r}
