@@ -258,7 +258,10 @@ def browser_open(headless: bool = False) -> dict:
                 "A Chrome window from another command is still open and holds the profile.\n"
                 "Close it, then retry."
             )
-        return _fail("Chrome did not open - see follow_bot.log.")
+        return _fail(
+            "Chrome did not open - see follow_bot.log.\n"
+            "If a Chrome window is still open from another command, close it and retry."
+        )
     # The login watcher reports asynchronously from its own thread; give it a
     # few seconds to probe the cookie before reporting the state.
     for _ in range(20):

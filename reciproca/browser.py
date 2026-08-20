@@ -111,6 +111,7 @@ def start_browser():
 
 def open_browser(headless=False):
     """Open Chrome browser with persistent profile."""
+    service = None
     try:
         log("🌐 Initializing Chrome...", 'info')
 
@@ -146,6 +147,15 @@ def open_browser(headless=False):
             f"{brief_error(e)}\n\nSee follow_bot.log next to the app for details.",
             'error',
         )
+        # A session that never started leaves its chromedriver behind: the
+        # Service owns the process, and it would linger idle after every failed
+        # attempt. Quit it when the driver was never created - if it was, the
+        # browser is alive and must not be touched.
+        if state.driver is None and service is not None:
+            try:
+                service.stop()
+            except Exception:
+                pass
     finally:
         state.browser_opening.clear()
         refresh_browser_state()
