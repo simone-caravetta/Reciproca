@@ -19,10 +19,14 @@ unfollow_last_session.json
 follow_bot.log
 follow_logs_*.txt
 
+# Agent provider settings - contains API keys (agent_config.example.json is
+# the tracked template)
+agent_config.json
+
 # The sentence model for the semantic ranking, fetched on first use and written
 # next to the app like everything else it generates. Over a hundred megabytes, and
-# nothing here authored it: see MODEL_REPO in reciproca.py for where it comes from.
-# Deleting this folder is how you make it download again.
+# nothing here authored it: see MODEL_REPO in reciproca/semantic.py for where it
+# comes from. Deleting this folder is how you make it download again.
 model/
 
 # Instagram data exports the user supplies locally

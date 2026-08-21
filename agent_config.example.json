@@ -1,0 +1,14 @@
+{
+  "provider": "openai",
+  "model": "deepseek-v4-flash",
+  "temperature": 0.2,
+  "openai_compatible": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "api_key": ""
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "model": "llama3.1"
+  }
+}
