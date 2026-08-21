@@ -8,6 +8,8 @@ engine rather than over a reimplementation of it.
 import os
 import sys
 
+from langchain_core.messages import AIMessage
+
 # langgraph 1.x renamed create_agent to create_react_agent, and the system
 # prompt moved from the system_prompt kwarg to prompt.
 from langgraph.prebuilt import create_react_agent as create_agent
@@ -21,6 +23,10 @@ The engine decides every individual follow or unfollow: ranking, bot filter, \
 delays, rate limits. Never override or second-guess its rules, and never \
 fabricate usernames, counts or outcomes - if a tool errors or returns \
 nothing, say so plainly and stop.
+
+Every user message is a fresh request: anything asked before has already \
+been executed and completed, so do not re-run it. If a request is ambiguous \
+or refers to something earlier, ask the user to restate it.
 
 Cycles are long and asynchronous. follow_cycle and unfollow_run return a \
 task_id immediately; poll cycle_status until it reports done, narrating \
@@ -52,6 +58,23 @@ SYSTEM_PROMPT_AUTONOMOUS = SYSTEM_PROMPT.replace(
     "destructive changes (queue_clear, queue_trim, unfollow_reset, "
     "config_set). Still announce what you are about to do before doing it.",
 )
+
+
+def turn_context(last_message):
+    """What the next REPL turn may see of the previous one.
+
+    Each turn gets only the user's new request, not the whole conversation:
+    with the full history in context, smaller models tend to re-run requests
+    that are already completed (the REPL used to feed the accumulated
+    messages, and the agent kept repeating earlier commands on every new
+    one). The one exception is a pending question from the agent - a
+    confirmation checkpoint - because a plain "si"/"ok" needs that question
+    to resolve, so it is carried into the next turn.
+    """
+    content = getattr(last_message, "content", "")
+    if isinstance(last_message, AIMessage) and str(content).rstrip().endswith("?"):
+        return [last_message]
+    return []
 
 
 def server_env():

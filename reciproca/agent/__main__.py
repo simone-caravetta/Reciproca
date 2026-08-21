@@ -76,13 +76,18 @@ async def _run(messages, agent):
 
     Must run inside the caller's event loop: the MCP tools are bound to the
     session's loop, and a fresh asyncio.run() loop could never reach them.
+    Returns the turn's last message, so the REPL can decide what the next
+    turn may refer to.
     """
     printed = set()
+    last = None
     async for step in agent.astream({"messages": messages}, stream_mode="values"):
         message = step["messages"][-1]
+        last = message
         if message.id not in printed:
             printed.add(message.id)
             render(message)
+    return last
 
 
 async def _amain():
@@ -119,13 +124,12 @@ async def _amain():
         print(f"🧰 {len(tools)} tools from the Reciproca MCP server\n")
         agent = agent_mod.build_agent(llm, tools, autonomous=args.autonomous)
 
-        messages = []
         if args.say:
-            messages.append(("user", args.say))
-            await _run(messages, agent)
+            await _run([("user", args.say)], agent)
             return
 
         print("Parla in italiano o in inglese; `quit` per uscire, Ctrl+C per fermare l'agente.\n")
+        last = None
         while True:
             try:
                 line = input("> ").strip()
@@ -136,8 +140,11 @@ async def _amain():
                 continue
             if line.lower() in ("quit", "exit"):
                 return
-            messages.append(("user", line))
-            await _run(messages, agent)
+            # One fresh request per turn: feeding the whole conversation back
+            # made the agent re-run requests that were already completed. Only
+            # a pending question from the agent survives, so a plain "si"/"ok"
+            # after a confirmation checkpoint still resolves (turn_context).
+            last = await _run(agent_mod.turn_context(last) + [("user", line)], agent)
 
 
 def main():

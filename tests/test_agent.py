@@ -123,6 +123,25 @@ class AgentAssemblyTest(unittest.TestCase):
         self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT)
         self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
 
+    def test_the_prompt_marks_each_user_message_as_fresh(self):
+        # With the full conversation in context the agent re-ran completed
+        # requests on every new command; the prompt now states the rule.
+        self.assertIn("fresh request", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("fresh request", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
+
+    def test_turn_context_keeps_only_a_pending_question(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        pending = AIMessage(content="Confermi che parto con lo scraping?")
+        self.assertEqual(agent_mod.turn_context(pending), [pending])
+        # Anything else resets the context: no history, no re-runs.
+        self.assertEqual(agent_mod.turn_context(AIMessage(content="Fatto.")), [])
+        self.assertEqual(
+            agent_mod.turn_context(ToolMessage(content="ok", tool_call_id="t")), [])
+        self.assertEqual(agent_mod.turn_context(None), [])
+        # A question buried in a content list does not count as pending.
+        self.assertEqual(agent_mod.turn_context(AIMessage(content=["Confermi?"])), [])
+
     def test_the_autonomous_variant_swaps_the_checkpoint_rule(self):
         self.assertNotEqual(agent_mod.SYSTEM_PROMPT, agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
         self.assertIn("pre-authorized", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
