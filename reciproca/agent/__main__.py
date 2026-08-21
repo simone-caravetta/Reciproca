@@ -98,7 +98,14 @@ async def _amain():
         settings["ollama"]["base_url"] = args.base_url
 
     llm = make_llm(settings)
-    print(f"🤖 Provider: {settings['provider']} · model: {settings['model']}")
+    # The model that matters depends on the provider: the top-level one is
+    # anthropic's, the sections carry openai/ollama's.
+    section_model = {
+        "anthropic": settings["model"],
+        "openai": settings["openai_compatible"]["model"],
+        "ollama": settings["ollama"]["model"],
+    }[settings["provider"]]
+    print(f"🤖 Provider: {settings['provider']} · model: {section_model}")
 
     # Not a context manager since adapter 0.1: construct, get the tools, and
     # keep the object alive - the tools open a stdio session per call.
