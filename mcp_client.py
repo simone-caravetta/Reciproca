@@ -24,6 +24,12 @@ import json
 import os
 import shlex
 import sys
+import warnings
+
+# pydantic-settings (a transitive dep of the mcp SDK) warns once about a
+# forward reference inside mcp's own settings model; not ours to fix.
+warnings.filterwarnings(
+    "ignore", message=r"Field 'lifespan' has an incomplete definition.*")
 
 try:
     from mcp import ClientSession, StdioServerParameters

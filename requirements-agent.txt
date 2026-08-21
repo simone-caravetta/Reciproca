@@ -1,0 +1,16 @@
+# The agent stack (milestone M4): LangChain agent + the MCP server it drives.
+#
+# Install alongside the core requirements:
+#     pip install -r requirements.txt -r requirements-agent.txt
+#
+# mcp is pinned to the 1.x line: langchain-mcp-adapters (up to 0.3.2) still
+# requires mcp<2.0.0, and mcp 2.0 renamed FastMCP -> MCPServer. The server
+# code therefore uses FastMCP (v1 API). When the adapter catches up with mcp
+# 2, this pin can move to mcp>=2.0 and the import in mcp_server.py renamed.
+mcp>=1.28,<2
+langchain
+langchain-core>=1.4.7
+langchain-mcp-adapters>=0.3.2
+langchain-anthropic
+langchain-openai
+langchain-ollama

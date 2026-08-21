@@ -39,8 +39,15 @@ import subprocess
 import threading
 import time
 import uuid
+import warnings
 
-from mcp.server import MCPServer
+# pydantic-settings (a transitive dep of the mcp SDK) warns once about a
+# forward reference inside mcp's own settings model. It is not ours to fix
+# and it clutters every run of the server and its clients.
+warnings.filterwarnings(
+    "ignore", message=r"Field 'lifespan' has an incomplete definition.*")
+
+from mcp.server.fastmcp import FastMCP
 
 from reciproca import browser, config, cycles, follow, persistence, semantic, state
 from reciproca import queue as queue_mod
@@ -48,14 +55,11 @@ from reciproca import unfollow
 from reciproca.logging_sink import RECENT, log
 from reciproca.utils import brief_error
 
-mcp = MCPServer(
+mcp = FastMCP(
     name="reciproca",
-    title="Reciproca",
-    description=(
-        "Control a Reciproca Instagram growth-testing session: browser, "
-        "follow and unfollow cycles, queue, hashtags, config, status."
-    ),
     instructions=(
+        "Control a Reciproca Instagram growth-testing session: browser, "
+        "follow and unfollow cycles, queue, hashtags, config, status. "
         "One browser, one session at a time. Long cycles are asynchronous: "
         "start them with follow_cycle / unfollow_run and poll cycle_status "
         "until it reports done. Individual follow decisions are made by the "
@@ -772,7 +776,14 @@ def stop() -> dict:
 
 
 def main():
-    mcp.run()
+    # The stdio transport returns when the client goes away (EOF) - the mcp
+    # SDK v2 process did not, which orphaned the server holding Chrome and
+    # the profile lock. The finally makes sure the exit also releases the
+    # browser, so a dead client cannot leave an orphaned Chrome behind.
+    try:
+        mcp.run()
+    finally:
+        browser.handle_browser_closed()
 
 
 if __name__ == "__main__":

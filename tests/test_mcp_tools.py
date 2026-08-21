@@ -92,7 +92,10 @@ class MCPToolTest(unittest.TestCase):
     def test_follow_cycle_schema_exposes_the_cycle_parameters(self):
         import asyncio
         tools = {t.name: t for t in asyncio.run(ms.mcp.list_tools())}
-        props = set(tools["follow_cycle"].input_schema.get("properties", {}))
+        # mcp SDK v1 names the field inputSchema; v2 renamed it input_schema.
+        # When the adapter supports mcp 2 and the pin moves, switch back.
+        schema = tools["follow_cycle"].inputSchema
+        props = set(schema.get("properties", {}))
         self.assertLessEqual(
             {"mode", "hashtags", "delay_min", "delay_max", "limit",
              "semantic_weight", "after_search", "headless", "auto_open",
