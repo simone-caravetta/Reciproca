@@ -117,6 +117,12 @@ class AgentAssemblyTest(unittest.TestCase):
         self.assertIn("confirm with the user", agent_mod.SYSTEM_PROMPT)
         self.assertIn("never fabricate", agent_mod.SYSTEM_PROMPT)
 
+    def test_the_prompt_forbids_tight_polling_loops(self):
+        # The agent polled cycle_status dozens of times in a row in testing:
+        # the prompt must impose a floor on the polling cadence.
+        self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
+
     def test_the_autonomous_variant_swaps_the_checkpoint_rule(self):
         self.assertNotEqual(agent_mod.SYSTEM_PROMPT, agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
         self.assertIn("pre-authorized", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)

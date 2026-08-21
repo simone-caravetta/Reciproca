@@ -274,6 +274,33 @@ class MCPToolTest(unittest.TestCase):
         result = ms.config_set("MAX_FOLLOWS_PER_SESSION", "many")
         self.assertFalse(result["ok"])
 
+    def test_config_set_rejects_negative_numbers(self):
+        result = ms.config_set("MAX_FOLLOWS_PER_SESSION", "-5")
+        self.assertFalse(result["ok"])
+        self.assertEqual(R.config.CONFIG["MAX_FOLLOWS_PER_SESSION"],
+                         R.config.DEFAULT_CONFIG["MAX_FOLLOWS_PER_SESSION"])
+
+    def test_config_set_rejects_a_min_above_its_max(self):
+        R.config.CONFIG["DEFAULT_DELAY_MAX"] = 1
+        result = ms.config_set("DEFAULT_DELAY_MIN", "5")
+        self.assertFalse(result["ok"])
+        self.assertIn("DEFAULT_DELAY_MAX", result["error"])
+
+    def test_config_set_rejects_a_max_below_its_min(self):
+        R.config.CONFIG["DEFAULT_DELAY_MIN"] = 10
+        result = ms.config_set("DEFAULT_DELAY_MAX", "3")
+        self.assertFalse(result["ok"])
+        self.assertIn("DEFAULT_DELAY_MIN", result["error"])
+
+    def test_config_set_accepts_a_consistent_pair(self):
+        result = ms.config_set("DEFAULT_DELAY_MIN", "5")
+        self.assertTrue(result["ok"])
+        self.assertEqual(R.config.CONFIG["DEFAULT_DELAY_MIN"], 5)
+        # Adjusting the other half to match stays fine too.
+        result = ms.config_set("DEFAULT_DELAY_MAX", "10")
+        self.assertTrue(result["ok"])
+        self.assertEqual(R.config.CONFIG["DEFAULT_DELAY_MAX"], 10)
+
     def test_config_reset_restores_defaults(self):
         R.config.CONFIG["DEFAULT_DELAY_MIN"] = 99
         result = ms.config_reset()
@@ -352,8 +379,54 @@ class MCPToolTest(unittest.TestCase):
             self.assertTrue(result["ok"])
             messages = [entry["message"] for entry in result["logs"]]
             self.assertEqual(messages, ["second line", "first line"])
+            sources = {entry["source"] for entry in result["logs"]}
+            self.assertEqual(sources, {"buffer"})
         finally:
             RECENT.clear()
+
+    def test_logs_tail_falls_back_to_the_log_file_when_the_buffer_is_empty(self):
+        from reciproca.logging_sink import RECENT, clear_sinks
+        clear_sinks()
+        RECENT.clear()
+        logfile = os.path.join(tempfile.mkdtemp(), "follow_bot.log")
+        with open(logfile, "w", encoding="utf-8") as f:
+            f.write("2026-08-21 10:00:00,000 - INFO - first line\n")
+            f.write("2026-08-21 10:00:01,000 - WARNING - second line\n")
+            f.write("    continuation line without a timestamp prefix\n")
+            f.write("2026-08-21 10:00:02,000 - ERROR - third line\n")
+        old = R.config.LOG_FILE
+        R.config.LOG_FILE = logfile
+        try:
+            result = ms.logs_tail(lines=10)
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [
+                    (e["time"], e["level"], e["message"], e["source"])
+                    for e in result["logs"]
+                ],
+                [
+                    ("2026-08-21 10:00:02,000", "ERROR", "third line", "file"),
+                    ("2026-08-21 10:00:01,000", "WARNING", "second line", "file"),
+                    ("2026-08-21 10:00:00,000", "INFO", "first line", "file"),
+                ],
+            )
+        finally:
+            RECENT.clear()
+            R.config.LOG_FILE = old
+
+    def test_logs_tail_from_a_missing_file_returns_an_empty_list(self):
+        from reciproca.logging_sink import RECENT, clear_sinks
+        clear_sinks()
+        RECENT.clear()
+        old = R.config.LOG_FILE
+        R.config.LOG_FILE = os.path.join(tempfile.mkdtemp(), "nope.log")
+        try:
+            result = ms.logs_tail(lines=10)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["logs"], [])
+        finally:
+            RECENT.clear()
+            R.config.LOG_FILE = old
 
     def test_stop_sets_the_events_and_writes_the_flag(self):
         result = ms.stop()

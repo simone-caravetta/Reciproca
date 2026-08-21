@@ -35,6 +35,7 @@ delays, rate limits). The tools only start, watch and stop sessions.
 import functools
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -654,12 +655,26 @@ def config_get(key: str = None) -> dict:
     return _ok(config={key: config.CONFIG[key]})
 
 
+def _pair(key):
+    """The other half of a *_MIN/*_MAX pair, as (counterpart, is_min).
+
+    None when the key is not a *_MIN/*_MAX key whose counterpart exists.
+    """
+    if key.endswith("_MIN") and key[:-3] + "MAX" in config.CONFIG:
+        return key[:-3] + "MAX", True
+    if key.endswith("_MAX") and key[:-3] + "MIN" in config.CONFIG:
+        return key[:-3] + "MIN", False
+    return None
+
+
 @mcp.tool()
 @_safe
 def config_set(key: str, value: str) -> dict:
     """Change one setting and save it. The value is typed by the current one:
     booleans accept 1/true/yes/on, numbers are parsed, everything else is
-    kept as text. Destructive-ish: confirm with the user first.
+    kept as text. Numbers must be non-negative and a *_MIN/*_MAX pair must
+    stay consistent (a MIN above its MAX is rejected). Destructive-ish:
+    confirm with the user first.
     """
     if key not in config.CONFIG:
         return _fail(f"no such key: {key}")
@@ -671,6 +686,16 @@ def config_set(key: str, value: str) -> dict:
             parsed = int(value)
         except ValueError:
             return _fail(f"{key} expects a number.")
+        if parsed < 0:
+            return _fail(f"{key} expects a non-negative number.")
+        pair = _pair(key)
+        if pair:
+            other, is_min = pair
+            if (parsed > config.CONFIG[other]) if is_min else (parsed < config.CONFIG[other]):
+                return _fail(
+                    f"{key}={parsed} would cross its pair {other}="
+                    f"{config.CONFIG[other]} (keep MIN <= MAX)."
+                )
     else:
         parsed = value
     config.CONFIG[key] = parsed
@@ -746,18 +771,50 @@ def status() -> dict:
     return _ok(**info)
 
 
+_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (\w+) - (.*)$")
+
+
+def _tail_log_file(lines):
+    """The last `lines` entries read from the persistent log file.
+
+    A freshly-started server has an empty in-memory buffer while the file
+    (follow_bot.log) still holds the full history. Multi-line messages appear
+    as continuation lines without a timestamp prefix; those are skipped. The
+    file belongs to every frontend (CLI, GUI, MCP), so this is the history the
+    buffer cannot see, not a duplicate of it.
+    """
+    try:
+        with open(config.LOG_FILE, encoding="utf-8") as f:
+            entries = [m for m in (_LOG_LINE.match(line) for line in f) if m]
+    except OSError:
+        return []
+    return [
+        {"time": m.group(1), "level": m.group(2), "message": m.group(3),
+         "source": "file"}
+        for m in entries[-lines:][::-1]
+    ]
+
+
 @mcp.tool()
 @_safe
 def logs_tail(lines: int = 50) -> dict:
-    """The last `lines` log entries (newest first), each with time and level."""
+    """The last `lines` log entries (newest first), each with time and level.
+
+    Served from the in-memory buffer of this server process; when that buffer
+    is empty (fresh server) the persistent follow_bot.log file is read
+    instead, so the full history is still available.
+    """
     if lines < 1:
         lines = 1
     if lines > 1000:
         lines = 1000
-    return _ok(logs=[
-        {"time": t, "level": level, "message": msg}
+    buffered = [
+        {"time": t, "level": level, "message": msg, "source": "buffer"}
         for t, level, msg in list(RECENT)[-lines:][::-1]
-    ])
+    ]
+    if buffered:
+        return _ok(logs=buffered)
+    return _ok(logs=_tail_log_file(lines))
 
 
 @mcp.tool()

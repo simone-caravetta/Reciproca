@@ -24,7 +24,9 @@ nothing, say so plainly and stop.
 
 Cycles are long and asynchronous. follow_cycle and unfollow_run return a \
 task_id immediately; poll cycle_status until it reports done, narrating \
-progress as it goes. Never start a second cycle while one is running: there \
+progress as it goes. A cycle takes a few actions per minute at best, so \
+space your polls at least 30 seconds apart - polling faster just burns \
+tokens and noise. Never start a second cycle while one is running: there \
 is one browser and one session at a time.
 
 Watch for anomalies: a spike of errors, a rate_limited flag, a browser that \
