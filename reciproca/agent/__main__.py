@@ -28,6 +28,7 @@ warnings.filterwarnings(
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 
 from reciproca.agent import agent as agent_mod
 from reciproca.agent.config import load_settings
@@ -107,32 +108,36 @@ async def _amain():
     }[settings["provider"]]
     print(f"🤖 Provider: {settings['provider']} · model: {section_model}")
 
-    # Not a context manager since adapter 0.1: construct, get the tools, and
-    # keep the object alive - the tools open a stdio session per call.
+    # One explicit session for the whole REPL. Tools built without a session
+    # (client.get_tools()) open a fresh stdio session per call and close it
+    # when the call returns - which sends EOF to the server and kills the
+    # browser it just opened. With a bound session the server (and browser)
+    # live for as long as this REPL does, and close cleanly when it exits.
     client = MultiServerMCPClient(agent_mod.mcp_connections())
-    tools = await client.get_tools()
-    print(f"🧰 {len(tools)} tools from the Reciproca MCP server\n")
-    agent = agent_mod.build_agent(llm, tools, autonomous=args.autonomous)
+    async with client.session("reciproca") as session:
+        tools = await load_mcp_tools(session)
+        print(f"🧰 {len(tools)} tools from the Reciproca MCP server\n")
+        agent = agent_mod.build_agent(llm, tools, autonomous=args.autonomous)
 
-    messages = []
-    if args.say:
-        messages.append(("user", args.say))
-        await _run(messages, agent)
-        return
+        messages = []
+        if args.say:
+            messages.append(("user", args.say))
+            await _run(messages, agent)
+            return
 
-    print("Parla in italiano o in inglese; `quit` per uscire, Ctrl+C per fermare l'agente.\n")
-    while True:
-        try:
-            line = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye - a running cycle is unaffected; `python -m reciproca stop` lo ferma.")
-            return
-        if not line:
-            continue
-        if line.lower() in ("quit", "exit"):
-            return
-        messages.append(("user", line))
-        await _run(messages, agent)
+        print("Parla in italiano o in inglese; `quit` per uscire, Ctrl+C per fermare l'agente.\n")
+        while True:
+            try:
+                line = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nBye - il browser e il server MCP si chiudono; un ciclo ancora in corso si ferma qui.")
+                return
+            if not line:
+                continue
+            if line.lower() in ("quit", "exit"):
+                return
+            messages.append(("user", line))
+            await _run(messages, agent)
 
 
 def main():
