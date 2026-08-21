@@ -475,12 +475,19 @@ def unfollow_reset() -> dict:
 @mcp.tool()
 @_safe
 def queue_list(limit: int = None) -> dict:
-    """The queue in rank order: username and affinity for the top `limit`."""
+    """The queue in rank order: username, sighting frequency, affinity and the
+    combined rank for the top `limit`. The order never comes from the affinity
+    alone: rank mixes the frequency score and the affinity with the
+    SEMANTIC_WEIGHT split (default 60% affinity / 40% frequency), so a
+    frequently-seen candidate can outrank one with a higher affinity."""
     items = queue_mod.load_queue()
-    ranked = queue_mod.rank_queue(items, queue_mod.ranking_frequencies())
+    frequencies = queue_mod.ranking_frequencies()
+    ranked = queue_mod.rank_queue(items, frequencies)
     entries = [
-        {"username": user, "affinity": queue_mod.queue_affinity(item)}
-        for user, _, item in ranked[:limit]
+        {"username": user, "rank": round(rank, 3),
+         "frequency": frequencies.get(user, 0),
+         "affinity": queue_mod.queue_affinity(item)}
+        for user, rank, item in ranked[:limit]
     ]
     return _ok(queue=entries, count=len(entries), total=len(items))
 
@@ -833,6 +840,15 @@ def stop() -> dict:
 
 
 def main():
+    # The server is a stdio child of the REPL (or any MCP client) that
+    # shares the terminal: its stderr lines would interleave with the
+    # user's input while a cycle streams progress. Logs belong in
+    # follow_bot.log, so drop the console handler and keep the file one.
+    import logging
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.StreamHandler):
+            root.removeHandler(handler)
     # The stdio transport returns when the client goes away (EOF) - the mcp
     # SDK v2 process did not, which orphaned the server holding Chrome and
     # the profile lock. The finally makes sure the exit also releases the

@@ -6,13 +6,61 @@ engine rather than over a reimplementation of it.
 """
 
 import os
+import select
 import sys
+import time
 
 from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
 
 # langgraph 1.x renamed create_agent to create_react_agent, and the system
 # prompt moved from the system_prompt kwarg to prompt.
 from langgraph.prebuilt import create_react_agent as create_agent
+
+# How often wait checks the terminal for a typed command while sleeping.
+_POLL_MS = 0.2
+
+
+def _read_pending_input():
+    """A line the user typed during a wait, if any; never blocks.
+
+    Only a real terminal counts: with a piped stdin (one-shot runs, tests,
+    scripts) a command that was queued since the start of the turn would
+    look like something typed "right now", so the wait ignores it there.
+    """
+    if not sys.stdin.isatty():
+        return None
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return None
+    if not ready:
+        return None
+    try:
+        line = sys.stdin.readline()
+    except (OSError, ValueError):
+        return None
+    return line or None
+
+
+@tool
+def wait(seconds: int = 30):
+    """Sleep without doing anything else. Use it between cycle_status polls
+    instead of polling repeatedly: a follow or unfollow cycle acts a few
+    times per minute, so nothing is learned by polling more often than
+    every 30 seconds - it just burns API calls and log noise. If the user
+    types a command while waiting, the wait ends at once and the command
+    is returned here as the user's new request.
+    """
+    seconds = min(max(seconds, 1), 120)
+    slept = 0.0
+    while slept < seconds:
+        line = _read_pending_input()
+        if line:
+            return f"Wait ended early - the user typed: {line.strip()}"
+        time.sleep(min(_POLL_MS, seconds - slept))
+        slept += _POLL_MS
+    return "Waited without interruption."
 
 SYSTEM_PROMPT = """\
 You operate Reciproca, a local Instagram growth-testing bot, through its MCP \
@@ -30,10 +78,17 @@ or refers to something earlier, ask the user to restate it.
 
 Cycles are long and asynchronous. follow_cycle and unfollow_run return a \
 task_id immediately; poll cycle_status until it reports done, narrating \
-progress as it goes. A cycle takes a few actions per minute at best, so \
-space your polls at least 30 seconds apart - polling faster just burns \
-tokens and noise. Never start a second cycle while one is running: there \
-is one browser and one session at a time.
+progress as it goes. A follow or unfollow cycle acts a few times per minute \
+at best, so wait at least 30 seconds between polls - call the wait tool \
+instead of polling repeatedly, which only burns tokens and log noise. \
+Scraping is different: it finds new profiles steadily, so poll a little \
+more often (every 10-15 seconds) and narrate what lands in the queue as it \
+happens - how many candidates so far, which hashtag is being searched - so \
+the user can follow the session live. The wait tool ends early when the \
+user types a command while you are polling - treat that as their new \
+request and act on it at once, dropping the cycle you were waiting on. \
+Never start a second cycle while one is running: there is one browser and \
+one session at a time.
 
 Watch for anomalies: a spike of errors, a rate_limited flag, a browser that \
 will not open. On an anomaly, call stop, then summarise what happened and \
@@ -106,9 +161,14 @@ def mcp_connections():
 
 
 def build_agent(llm, tools, autonomous=False):
-    """The agent graph: the model with the tools bound and the prompt set."""
+    """The agent graph: the model with the tools bound and the prompt set.
+
+    The local wait tool is mixed into the MCP tools: it gives the model a
+    cheap way to pace its cycle_status polling (the model used to re-poll
+    every couple of seconds, flooding the API and the terminal).
+    """
     return create_agent(
         llm,
-        tools,
+        [*tools, wait],
         prompt=SYSTEM_PROMPT_AUTONOMOUS if autonomous else SYSTEM_PROMPT,
     )

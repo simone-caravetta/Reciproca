@@ -400,6 +400,34 @@ class ScoringPassTest(unittest.TestCase):
             R.state.stop_requested.clear()
             R.state.scoring_stop.clear()
 
+    def test_a_pass_launched_after_a_stop_starts_clean(self):
+        """Stop leaves its flag set for the pass it interrupted; a resumed pass
+        must start clear, or 'resume after stop' would die at 0 candidates
+        (seen live: stop at 20/80, then two resumes that stopped at 0/77)."""
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        R.state.scoring_stop.set()          # a previous stop is still pending
+        try:
+            self.assertEqual(R.score_queue(self.scorer({}), limit=10), 2)
+        finally:
+            R.state.scoring_stop.clear()
+
+    def test_a_resume_with_stop_requested_pending_starts_clean(self):
+        """The MCP/CLI standalone scoring shares stop_requested, which nothing
+        else ever clears; its own pass must clear it as it starts."""
+        R.save_frequencies(R.Counter({"a": 9, "b": 7}))
+        R.add_to_queue(["a", "b"])
+
+        R.state.stop_requested.set()
+        try:
+            self.assertEqual(
+                R.score_queue(self.scorer({}), limit=10,
+                              stop_event=R.state.stop_requested),
+                2)
+        finally:
+            R.state.stop_requested.clear()
+
     def test_an_entry_written_by_an_older_version_can_still_be_scored(self):
         R.save_queue(["a", "b"])
         R.save_frequencies(R.Counter({"a": 9, "b": 7}))

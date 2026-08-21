@@ -354,6 +354,11 @@ def score_queue(scorer, limit=None, frequencies=None, on_progress=None, stop_eve
         limit = config.CONFIG["SEMANTIC_TOP_K"]
     if stop_event is None:
         stop_event = state.scoring_stop
+    # A stop flag left set by the pass it interrupted must not kill the next
+    # one: stopping is one-shot, and a resumed pass starts clear (the follow
+    # path clears its own flag before this same call; the standalone frontends
+    # share stop_requested, which nobody else would ever clear again).
+    stop_event.clear()
 
     queue = load_queue()
     shortlist = scoring_shortlist(queue, limit, frequencies)

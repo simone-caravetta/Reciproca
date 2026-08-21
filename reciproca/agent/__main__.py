@@ -18,6 +18,7 @@ called.
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import warnings
 
@@ -26,13 +27,39 @@ import warnings
 warnings.filterwarnings(
     "ignore", message=r"Field 'lifespan' has an incomplete definition.*")
 
+# The OpenAI-compatible client logs every HTTP round-trip at INFO (httpx2 is
+# the logger the current openai client uses; the plain-httpx and httpcore
+# names cover the older stack). In the REPL that interleaves with the user's
+# input line while a cycle streams progress; follow_bot.log keeps the
+# detail, so raise the console level.
+for _quiet_logger in ("httpx", "httpx2", "httpcore", "openai"):
+    logging.getLogger(_quiet_logger).setLevel(logging.WARNING)
+
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from reciproca import config
 from reciproca.agent import agent as agent_mod
 from reciproca.agent.config import load_settings
 from reciproca.agent.provider import make_llm
+
+
+WELCOME = """\
+🤖 Ciao! 👋
+
+Sono qui per aiutarti a gestire la crescita del tuo account Instagram tramite Reciproca. Posso occuparmi di:
+
+- **Follow** – avviare cicli di follow mirati su hashtag o dalla coda salvata
+- **Unfollow** – caricare i tuoi file di esportazione dati e smistare chi non ti segue più
+- **Coda** – gestire i candidati (aggiungere, rimuovere, ordinare per affinità)
+- **Hashtag** – gestire la lista salvata per le ricerche
+- **Configurazione** – rivedere e modificare le impostazioni
+
+Vuoi sapere lo stato attuale del bot, o hai già un obiettivo in mente per oggi? Dimmi pure come vuoi procedere!
+
+(scrivi `quit` per uscire)
+"""
 
 
 def build_parser():
@@ -53,22 +80,48 @@ def build_parser():
     return p
 
 
-_last_printed = {}
+_tool_logger_instance = None
+
+
+def _tool_logger():
+    """A file-only logger for the tool calls and their raw results.
+
+    The server already logs its core operations in follow_bot.log, but the
+    MCP payloads the REPL sees are not in there. This logger writes them to
+    the same file with no console handler, so the detail survives in the log
+    without cluttering the terminal the user types in.
+    """
+    global _tool_logger_instance
+    if _tool_logger_instance is None:
+        logger = logging.getLogger("reciproca.agent.tools")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        handler = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logger.addHandler(handler)
+        _tool_logger_instance = logger
+    return _tool_logger_instance
 
 
 def render(message):
-    """One line of the conversation as it streams in."""
+    """One line of the conversation as it streams in.
+
+    Only the agent's plain replies reach the terminal: the tool calls (🔧)
+    and their raw results (📦) are long payloads that interleave with the
+    user's own typing, so they are filed into the log instead.
+    """
     if isinstance(message, AIMessage):
         for call in message.tool_calls:
-            print(f"\n🔧 {call['name']}({json.dumps(call['args'], ensure_ascii=False)})",
-                  flush=True)
+            _tool_logger().info("🔧 %s(%s)", call["name"],
+                                json.dumps(call["args"], ensure_ascii=False))
         if message.content:
             print(f"\n🤖 {message.content}", flush=True)
     elif isinstance(message, ToolMessage):
         content = str(message.content)
         if len(content) > 500:
             content = content[:500] + "…"
-        print(f"\n📦 {content}", flush=True)
+        _tool_logger().info("📦 %s", content)
 
 
 async def _run(messages, agent):
@@ -104,14 +157,6 @@ async def _amain():
         settings["ollama"]["base_url"] = args.base_url
 
     llm = make_llm(settings)
-    # The model that matters depends on the provider: the top-level one is
-    # anthropic's, the sections carry openai/ollama's.
-    section_model = {
-        "anthropic": settings["model"],
-        "openai": settings["openai_compatible"]["model"],
-        "ollama": settings["ollama"]["model"],
-    }[settings["provider"]]
-    print(f"🤖 Provider: {settings['provider']} · model: {section_model}")
 
     # One explicit session for the whole REPL. Tools built without a session
     # (client.get_tools()) open a fresh stdio session per call and close it
@@ -121,14 +166,13 @@ async def _amain():
     client = MultiServerMCPClient(agent_mod.mcp_connections())
     async with client.session("reciproca") as session:
         tools = await load_mcp_tools(session)
-        print(f"🧰 {len(tools)} tools from the Reciproca MCP server\n")
         agent = agent_mod.build_agent(llm, tools, autonomous=args.autonomous)
 
         if args.say:
             await _run([("user", args.say)], agent)
             return
 
-        print("Parla in italiano o in inglese; `quit` per uscire, Ctrl+C per fermare l'agente.\n")
+        print(WELCOME)
         last = None
         while True:
             try:

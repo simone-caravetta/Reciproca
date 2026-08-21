@@ -208,6 +208,23 @@ class MCPToolTest(unittest.TestCase):
         ms.queue_clear()
         self.assertEqual(ms.queue_list()["total"], 0)
 
+    def test_queue_list_exposes_frequency_and_combined_rank(self):
+        """The agent must see why a candidate ranks where it does: the order
+        mixes the sighting frequency with the affinity (SEMANTIC_WEIGHT
+        split), so both numbers ride along with each entry."""
+        ms.queue_add(["alice", "bob"])
+        R.save_frequencies(R.Counter({"alice": 9, "bob": 2}))
+        R.state.last_scrape_frequencies = None  # drop the per-process cache
+
+        listed = ms.queue_list()
+        by_name = {entry["username"]: entry for entry in listed["queue"]}
+        self.assertEqual(by_name["alice"]["frequency"], 9)
+        self.assertEqual(by_name["bob"]["frequency"], 2)
+        self.assertTrue(all(isinstance(e["rank"], float) for e in listed["queue"]))
+        # With nobody scored yet, frequency alone decides the rank: the more
+        # often seen candidate sits on top, affinity would be missing anyway.
+        self.assertEqual([e["username"] for e in listed["queue"]], ["alice", "bob"])
+
     def test_queue_remove_something_not_there(self):
         result = ms.queue_remove("ghost")
         self.assertTrue(result["ok"])

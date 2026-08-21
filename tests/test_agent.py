@@ -8,13 +8,16 @@ path the REPL takes at startup.
 Requires the agent stack (requirements-agent.txt); the integration class is
 skipped when it is not installed.
 """
+import logging
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 import _stubs  # noqa: F401
 
+from reciproca import config
 from reciproca.agent import agent as agent_mod
 from reciproca.agent import config as acfg
 from reciproca.agent import provider as ap
@@ -119,9 +122,75 @@ class AgentAssemblyTest(unittest.TestCase):
 
     def test_the_prompt_forbids_tight_polling_loops(self):
         # The agent polled cycle_status dozens of times in a row in testing:
-        # the prompt must impose a floor on the polling cadence.
+        # the prompt must impose a floor on the polling cadence, and point at
+        # the wait tool instead of re-polling.
         self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT)
         self.assertIn("30 seconds", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
+        self.assertIn("wait tool", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("wait tool", agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
+        # Scraping finds profiles steadily, so it gets a livelier cadence and
+        # live narration, unlike the slow follow/unfollow cycles.
+        self.assertIn("10-15 seconds", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("narrate what lands in the queue", agent_mod.SYSTEM_PROMPT)
+
+    def _total_slept(self, sleep_mock):
+        return sum(c.args[0] for c in sleep_mock.call_args_list)
+
+    def test_the_wait_tool_sleeps_with_a_safe_clamp(self):
+        from reciproca.agent.agent import wait
+
+        with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                mock.patch("reciproca.agent.agent._read_pending_input",
+                           return_value=None):
+            # The requested duration is slept in small ticks so the terminal
+            # stays responsive to a typed command.
+            wait.invoke({"seconds": 45})
+            self.assertAlmostEqual(self._total_slept(sleep), 45.0, places=1)
+            sleep.reset_mock()
+            # Out-of-range requests are clamped, never free-form.
+            wait.invoke({"seconds": 500})
+            self.assertAlmostEqual(self._total_slept(sleep), 120.0, places=1)
+            sleep.reset_mock()
+            wait.invoke({"seconds": -3})
+            self.assertAlmostEqual(self._total_slept(sleep), 1.0, places=1)
+            sleep.reset_mock()
+            # The default paces the 30-second polling floor.
+            wait.invoke({})
+            self.assertAlmostEqual(self._total_slept(sleep), 30.0, places=1)
+
+    def test_the_wait_tool_ends_early_on_a_user_command(self):
+        from reciproca.agent.agent import wait
+
+        with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                mock.patch("reciproca.agent.agent._read_pending_input",
+                           return_value="fermati\n") as inp:
+            result = wait.invoke({"seconds": 60})
+        self.assertIn("fermati", result)
+        # The command was seen before any sleeping happened.
+        sleep.assert_not_called()
+        inp.assert_called_once()
+
+    def test_a_blank_line_does_not_interrupt_the_wait(self):
+        from reciproca.agent.agent import wait
+
+        with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                mock.patch("reciproca.agent.agent._read_pending_input",
+                           return_value=None):
+            wait.invoke({"seconds": 2})
+        self.assertGreater(len(sleep.call_args_list), 0)
+
+    def test_read_pending_input_ignores_a_piped_stdin(self):
+        # Only a real terminal can interrupt a wait: with a pipe, commands
+        # queued at the start of the turn would look like fresh typing.
+        from reciproca.agent.agent import _read_pending_input
+        with mock.patch.object(sys.stdin, "isatty", return_value=False):
+            self.assertIsNone(_read_pending_input())
+
+    def test_the_prompt_hands_a_typed_command_back_as_a_new_request(self):
+        self.assertIn("ends early when the user types a command",
+                      agent_mod.SYSTEM_PROMPT)
+        self.assertIn("ends early when the user types a command",
+                      agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
 
     def test_the_prompt_marks_each_user_message_as_fresh(self):
         # With the full conversation in context the agent re-ran completed
@@ -163,6 +232,50 @@ class AgentAssemblyTest(unittest.TestCase):
         self.assertEqual(args.provider, "ollama")
         self.assertEqual(args.say, "ciao")
         self.assertFalse(args.autonomous)
+
+    def test_render_logs_tool_noise_instead_of_printing_it(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+        from reciproca.agent import __main__ as repl
+
+        with mock.patch("reciproca.agent.__main__.print") as print_mock:
+            with mock.patch("reciproca.agent.__main__._tool_logger") as lg:
+                repl.render(AIMessage(
+                    content="Apro il browser",
+                    tool_calls=[{"name": "browser_open", "args": {"headless": False},
+                                 "id": "c1", "type": "tool_call"}]))
+                repl.render(ToolMessage(content='{"ok": true}', tool_call_id="c1"))
+
+        # The terminal only ever sees the agent's plain replies.
+        printed = [c.args[0] for c in print_mock.call_args_list]
+        self.assertEqual(printed, ["\n🤖 Apro il browser"])
+        # The tool call and its result are filed away in the log instead.
+        logged = [c.args for c in lg.return_value.info.call_args_list]
+        self.assertEqual(logged[0][0], "🔧 %s(%s)")
+        self.assertEqual(logged[0][1], "browser_open")
+        self.assertEqual(logged[1][0], "📦 %s")
+        self.assertEqual(logged[1][1], '{"ok": true}')
+
+    def test_the_welcome_message_opens_the_repl(self):
+        from reciproca.agent import __main__ as repl
+        self.assertIn("Ciao", repl.WELCOME)
+        self.assertIn("**Follow**", repl.WELCOME)
+        self.assertIn("**Unfollow**", repl.WELCOME)
+        self.assertIn("quit", repl.WELCOME)
+
+    def test_the_tool_logger_only_writes_to_the_file(self):
+        from reciproca.agent import __main__ as repl
+
+        logger = repl._tool_logger()
+        try:
+            self.assertFalse(logger.propagate, "must not reach the console handler")
+            self.assertEqual(len(logger.handlers), 1)
+            handler = logger.handlers[0]
+            self.assertIsInstance(handler, logging.FileHandler)
+            self.assertEqual(os.path.abspath(handler.baseFilename),
+                             os.path.abspath(config.LOG_FILE))
+        finally:
+            logger.handlers[0].close()
+            repl._tool_logger_instance = None
 
 
 @unittest.skipIf(MultiServerMCPClient is None, "agent stack not installed")

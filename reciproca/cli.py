@@ -427,20 +427,25 @@ def cmd_queue_list(args):
 
 def cmd_queue_rank(args):
     items = queue_mod.load_queue()
-    ranked = queue_mod.rank_queue(items, queue_mod.ranking_frequencies())
+    frequencies = queue_mod.ranking_frequencies()
+    ranked = queue_mod.rank_queue(items, frequencies)
     if args.json:
         print(json.dumps(
-            [{"username": user, "affinity": queue_mod.queue_affinity(item)}
-             for user, _, item in ranked[: args.limit]], indent=2, ensure_ascii=False))
+            [{"username": user, "rank": round(rank, 3),
+              "frequency": frequencies.get(user, 0),
+              "affinity": queue_mod.queue_affinity(item)}
+             for user, rank, item in ranked[: args.limit]], indent=2,
+            ensure_ascii=False))
         return 0
     if not ranked:
         print("Queue is empty.")
         return 0
-    print(f"{'rank':>4}  {'username':<32} affinity")
-    for n, (user, _, item) in enumerate(ranked[: args.limit], 1):
+    print(f"{'#':>4}  {'username':<32} {'freq':>4}  {'affinity':>8}  rank")
+    for n, (user, rank, item) in enumerate(ranked[: args.limit], 1):
         affinity = queue_mod.queue_affinity(item)
         shown = f"{affinity:.2f}" if affinity is not None else "-"
-        print(f"{n:>4}  {user:<32} {shown}")
+        print(f"{n:>4}  {user:<32} {frequencies.get(user, 0):>4}  "
+              f"{shown:>8}  {rank:.3f}")
     return 0
 
 
