@@ -4,9 +4,10 @@
 
 Python tool for **testing growth strategies** on your own Instagram account
 and **managing** the follow relationships they produce. A deterministic core
-(Selenium drives an ordinary Chrome window) sits under four interchangeable
+(Selenium drives an ordinary Chrome window) sits under five interchangeable
 frontends: a command-line interface, a Tkinter desktop GUI, an MCP server,
-and a natural-language agent built on it.
+a natural-language agent built on it, and a Telegram bot that talks to that
+same agent from your phone.
 
 Everything runs on your own machine: no account to create, no API key, no third-party
 service in the middle. You log into Instagram yourself, in an ordinary Chrome window
@@ -39,7 +40,7 @@ plausibly do by hand, which is the point.
 
 ```bash
 pip install -r requirements.txt            # core: CLI, GUI
-pip install -r requirements-agent.txt      # MCP server + agent (optional)
+pip install -r requirements-agent.txt      # MCP server + agent + Telegram (optional)
 ```
 
 Google Chrome must be installed; `webdriver-manager` downloads the matching
@@ -56,6 +57,9 @@ profile, and can be used interchangeably:
   opens the five-tab desktop app.
 - **Agent** - `python -m reciproca.agent` opens a REPL where you give goals
   in natural language and a LangChain agent drives the same tools.
+- **Telegram** - `python -m reciproca.telegram_bot` is the same agent
+  behind a chat bot: goals and monitoring from your phone, log lines
+  streamed in throttled batches.
 - **MCP server** - `python -m reciproca.mcp_server` exposes the same
   operations over the Model Context Protocol, for external orchestrators.
 
@@ -237,11 +241,48 @@ A typical exchange:
 (`🔧` tool calls are streamed into `follow_bot.log`, not the terminal, so
 your typing is never interleaved with payloads.)
 
+## Telegram
+
+`python -m reciproca.telegram_bot` is the same agent runner behind a chat
+bot (long polling): you send goals in natural language from your phone and
+the agent's narration comes back as chat messages, while the session's log
+lines are forwarded in throttled batches every few seconds. One process is
+enough - the bot is the agent, and the browser stays on the machine that
+runs it, exactly like every other frontend.
+
+```bash
+pip install -r requirements-agent.txt
+python -m reciproca.telegram_bot
+```
+
+The bot's own settings live in `telegram_config.json` next to the app
+(template: `telegram_config.example.json`):
+
+```json
+{
+  "token": "123456789:ABC...",
+  "allowed_chat_ids": [123456789]
+}
+```
+
+- **Token**: create the bot with @BotFather and paste the token. The file is
+  git-ignored (the token is a secret); `RECIPROCA_TELEGRAM_TOKEN` overrides it.
+- **Chat id**: anyone not in `allowed_chat_ids` gets a reply telling them
+  their chat id - write to the bot once, copy the number it answers, restart.
+  An empty allowlist lets nobody in.
+- The LLM provider is `agent_config.json`, the same file the REPL uses; the
+  flags `--provider/--model/--base-url` and `--autonomous` work too.
+
+While the agent sleeps (the `wait` tool), a chat message interrupts the wait
+exactly like a typed command does in the REPL and is handled inside the
+running turn; messages sent while it is not waiting are queued and become
+the next turn, one at a time.
+
 ## Coming soon
 
 - [DONE] Semantic ranking of candidates during Deep Search, powered by AI
-- Telegram frontend: the same agent runner behind a chat bot, with throttled
-  log forwarding (the agent REPL is already one frontend of the same runner)
+- [DONE] Telegram frontend: the same agent runner behind a chat bot, with
+  throttled log forwarding
 - More Instagram interface languages (see below)
 
 ## Instagram language support
@@ -275,8 +316,8 @@ This produces `dist\Reciproca\Reciproca.exe`.
 ## Tests
 
 ```bash
-pip install -r requirements-agent.txt   # for the MCP/agent test modules
-python -m unittest discover -s tests -t tests   # queue, authors, bot filter, MCP tools, agent
+pip install -r requirements-agent.txt   # for the MCP/agent/Telegram test modules
+python -m unittest discover -s tests -t tests   # queue, authors, bot filter, MCP tools, agent, Telegram bot
 npm install jsdom && node tests/test_extraction.js   # followers-dialog extraction
 ```
 
@@ -294,8 +335,9 @@ python check_profile.py <username>   # close Reciproca first
 ## Generated files (git-ignored)
 
 `chrome_profile/` and the app's own JSON state and logs, all written next to the
-app. `agent_config.json` (your API keys) is ignored too - copy
-`agent_config.example.json` to create one. See `.gitignore`.
+app. `agent_config.json` (your API keys) and `telegram_config.json` (your bot
+token) are ignored too - copy `agent_config.example.json` and
+`telegram_config.example.json` to create them. See `.gitignore`.
 
 ## License
 

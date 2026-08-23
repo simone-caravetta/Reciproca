@@ -23,6 +23,10 @@ follow_logs_*.txt
 # the tracked template)
 agent_config.json
 
+# Telegram bot settings - the token is a secret (telegram_config.example.json
+# is the tracked template)
+telegram_config.json
+
 # The sentence model for the semantic ranking, fetched on first use and written
 # next to the app like everything else it generates. Over a hundred megabytes, and
 # nothing here authored it: see MODEL_REPO in reciproca/semantic.py for where it

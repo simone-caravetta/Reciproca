@@ -14,3 +14,8 @@ langchain-mcp-adapters>=0.3.2
 langchain-anthropic
 langchain-openai
 langchain-ollama
+
+# The Telegram frontend (milestone M6): python-telegram-bot >=21 has the
+# Application builder with post_init/post_shutdown that the bot's lifecycle
+# relies on.
+python-telegram-bot>=21
