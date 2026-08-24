@@ -102,6 +102,34 @@ def _safe(fn):
     return wrapper
 
 
+def _plain_strings(items, what, example):
+    """Normalise a list argument into plain non-empty strings.
+
+    Weak local tool calling emits list items as single-key objects -
+    {"text": "analog"}, {"username": "alice"} - instead of bare strings.
+    A single-key object whose value is a non-empty string is unwrapped;
+    everything else is rejected, so a malformed call can never corrupt
+    the saved file. Returns (list, None) or (None, error_payload).
+    """
+    if not isinstance(items, list):
+        return None, _fail(
+            f"{what} must be a list, got {type(items).__name__}.")
+    out = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            out.append(item)
+            continue
+        if isinstance(item, dict) and len(item) == 1:
+            value = next(iter(item.values()))
+            if isinstance(value, str) and value.strip():
+                out.append(value)
+                continue
+        return None, _fail(
+            f"{what} must be a list of plain non-empty strings - "
+            f"pass e.g. {example} - got {item!r}.")
+    return out, None
+
+
 def _chrome_window_on_profile():
     """True when a Chrome window is running on the app's profile.
 
@@ -495,10 +523,20 @@ def queue_list(limit: int = None) -> dict:
 @mcp.tool()
 @_safe
 def queue_add(usernames: list) -> dict:
-    """Add usernames to the queue (duplicates and already-followed are skipped)."""
+    """Add usernames to the queue (duplicates and already-followed are skipped).
+
+    The argument is a plain list of username strings, e.g. ["alice", "bob"];
+    a single-key object whose value is the username is unwrapped, anything
+    else is rejected - a malformed call must never corrupt the queue the way
+    the old str() coercion used to (it saved "alice" as "{'text': 'alice'}").
+    """
+    usernames, err = _plain_strings(
+        usernames, "usernames", '["alice", "bob"]')
+    if err:
+        return err
     if not usernames:
         return _fail("no usernames given")
-    new, total = queue_mod.add_to_queue([str(u) for u in usernames])
+    new, total = queue_mod.add_to_queue(usernames)
     return _ok(added=new, total=total)
 
 
@@ -618,11 +656,41 @@ def hashtags_list() -> dict:
 @mcp.tool()
 @_safe
 def hashtags_add(hashtags: list) -> dict:
-    """Add hashtags to the saved list (duplicates are kept, like the CLI)."""
+    """Add hashtags to the saved list (duplicates are kept, like the CLI).
+
+    The argument is a plain list of tag strings, one per tag - e.g.
+    ["street", "35mm"]. A single-key object whose value is the tag (how weak
+    local tool calling emits it, e.g. {"text": "street"}) is unwrapped;
+    anything else is rejected, so a malformed call can never corrupt the
+    saved file the way a raw string used to (iterated character by
+    character). A single string is accepted and split (a JSON list, a comma
+    list, or one tag).
+    """
+    if isinstance(hashtags, str):
+        text = hashtags.strip()
+        if not text:
+            return _fail("no hashtags given")
+        if text.startswith("{"):
+            return _fail(
+                "hashtags looks like a JSON object - pass a plain tag or a "
+                "list of tags, not a structure.")
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return _fail("hashtags looks like a JSON list but does not parse.")
+            if not isinstance(parsed, list):
+                return _fail("hashtags looks like a JSON list but is not a list.")
+            hashtags = parsed
+        else:
+            hashtags = [part.strip() for part in text.split(",") if part.strip()]
+    hashtags, err = _plain_strings(hashtags, "hashtags", '["street", "35mm"]')
+    if err:
+        return err
     if not hashtags:
         return _fail("no hashtags given")
     tags = _hashtags()
-    tags.extend(str(h) for h in hashtags)
+    tags.extend(hashtags)
     persistence.save_hashtags(tags)
     return _ok(hashtags=tags, count=len(tags))
 
@@ -704,6 +772,11 @@ def config_set(key: str, value: str) -> dict:
                     f"{config.CONFIG[other]} (keep MIN <= MAX)."
                 )
     else:
+        candidate = value.strip()
+        if candidate.startswith(("{", "[")):
+            return _fail(
+                f"{key} expects plain text, but the value looks like JSON "
+                f"({candidate[:40]}). Pass the raw value, not a JSON structure.")
         parsed = value
     config.CONFIG[key] = parsed
     if not config.save_config(config.CONFIG):

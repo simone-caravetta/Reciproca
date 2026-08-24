@@ -10,7 +10,20 @@ Importing this module is what installs the stubs, so it has to come before
 """
 import os
 import sys
+import tempfile
 import types
+
+# The test suite must never write into the real follow_bot.log: the agent
+# reads that file through logs_tail, and the tests' fake browser sessions
+# would pollute it with phantom logins ("Username captured from the login:
+# mario.rossi"), artificial errors ("boom") and fake driver exceptions -
+# exactly what the agent would then report as if it had really happened.
+# Redirecting before reciproca is imported makes basicConfig, the agent's
+# tool logger and the MCP server subprocess (which inherits os.environ) all
+# land in a throwaway directory.
+TEST_LOG_DIR = tempfile.mkdtemp(prefix="reciproca-tests-")
+os.environ.setdefault("RECIPROCA_LOG_FILE",
+                       os.path.join(TEST_LOG_DIR, "follow_bot.log"))
 
 STUBBED = [
     "selenium", "selenium.common", "selenium.common.exceptions",

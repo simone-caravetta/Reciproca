@@ -238,6 +238,26 @@ A typical exchange:
     > fermati
     🤖 Ok, interrompo subito. Ho seguito 2 dei 5.
 
+The dialogue has memory, so it works on small local models as well as on
+large API ones: each turn opens with a compact block summarising the
+previous turns (last request, outcome, open question), built mechanically
+from the turn's own messages - no AI summarisation, so it is as reliable
+as the smallest model. The conversation works in English and Italian; a
+bare confirmation in either language ("si", "ok", "certo", "yes", "sure",
+"yeah", ...) is resolved explicitly against the pending question, never
+left to inference. Asking for a recap ("riassumi la chat", "summarize the
+conversation") widens the memory to the whole kept conversation, so the
+answer is not cut off at the last few exchanges. The `wait` tool doubles
+as the monitor: it reports the running task's status in its result and
+ends early on every change, so progress narrates itself. A wait - or a
+silent read-only poll - that keeps returning "nothing new" is capped, and
+past the cap the runner closes the turn itself with the current status
+line: the conversation never hangs on a model that polls without
+narrating, and the running cycle is untouched either way (it lives in the
+server). If the model falls silent while a task runs, the status line is
+pushed directly; the status monitor itself is guarded, so a bad poll is
+skipped instead of killing the updates.
+
 (`🔧` tool calls are streamed into `follow_bot.log`, not the terminal, so
 your typing is never interleaved with payloads.)
 
@@ -277,6 +297,14 @@ While the agent sleeps (the `wait` tool), a chat message interrupts the wait
 exactly like a typed command does in the REPL and is handled inside the
 running turn; messages sent while it is not waiting are queued and become
 the next turn, one at a time.
+
+The wait also monitors: it reports the running task's status and wakes on
+every change, so the agent narrates progress on its own (no need to ask
+"come va?"). If the agent falls silent while a task runs, the bot sends the
+status line directly; and if a model keeps polling without ever narrating,
+the bot closes that turn with the current status line, so the chat never
+hangs. Each chat keeps its own conversation memory, so a bare "si"/"yes"
+resolves the previous turn's question instead of being forgotten.
 
 ## Coming soon
 

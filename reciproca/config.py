@@ -105,7 +105,11 @@ CONFIG_FILE = data_path("bot_config.json")
 UNFOLLOW_PROGRESS_FILE = data_path("unfollow_progress.json")
 UNFOLLOW_SESSION_FILE = data_path("unfollow_last_session.json")
 ACCOUNT_USERNAME_FILE = data_path("account_username.json")
-LOG_FILE = data_path("follow_bot.log")
+# RECIPROCA_LOG_FILE redirects the app log elsewhere. The test suite sets
+# it (via tests/_stubs.py) so a test run never writes into the log the
+# agent reads through logs_tail - the tests' fake browser sessions would
+# pollute it with phantom logins and artificial errors.
+LOG_FILE = os.environ.get("RECIPROCA_LOG_FILE") or data_path("follow_bot.log")
 CHROME_PROFILE_DIR = data_path("chrome_profile")
 
 # Written by the `stop` command of another process, so a running session stops at

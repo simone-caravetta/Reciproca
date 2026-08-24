@@ -9,6 +9,7 @@ shape as the REPL loop and is exercised by running the bot itself.
 Requires the agent stack (requirements-agent.txt); the module import is
 skipped when it is not installed.
 """
+import asyncio
 import os
 import queue
 import tempfile
@@ -152,10 +153,14 @@ class WaitRedirectTest(unittest.TestCase):
 
     def setUp(self):
         self._original = agent_mod._read_pending_input
+        agent_mod.reset_wait_state()
+        agent_mod.set_status_provider(None)
         tb._pending = queue.SimpleQueue()
 
     def tearDown(self):
         agent_mod._read_pending_input = self._original
+        agent_mod.reset_wait_state()
+        agent_mod.set_status_provider(None)
         tb._pending = queue.SimpleQueue()
 
     def test_a_chat_message_ends_the_wait_early(self):
@@ -178,6 +183,60 @@ class WaitRedirectTest(unittest.TestCase):
         tb._pending.put((42, "fermati"))
         agent_mod._read_pending_input()  # the wait's pop
         self.assertTrue(tb._pending.empty())
+
+    def test_run_turn_closes_a_silent_polling_turn_with_the_status_line(self):
+        # Same backstop as the REPL: a model that keeps polling without
+        # narrating gets the turn closed with the current status line, so
+        # the chat stays responsive and the running cycle is untouched.
+        from langchain_core.messages import AIMessage
+        from reciproca.agent.memory import SessionMemory
+
+        class FakeAgent:
+            def __init__(self, messages):
+                self._messages = messages
+
+            async def astream(self, config, stream_mode=None):
+                for m in self._messages:
+                    yield {"messages": [m]}
+
+        polls = [
+            AIMessage(id=f"m{i}", content="", tool_calls=[
+                {"name": "cycle_status", "args": {}, "id": f"c{i}",
+                 "type": "tool_call"}])
+            for i in range(5)
+        ]
+        watch = agent_mod.StatusWatch()
+        watch.update("Task a1b2 (follow_cycle): 2/5")
+        app = mock.MagicMock()
+        app.bot_data = {
+            "agent": FakeAgent(polls),
+            "watch": watch,
+            "last_narration_at": 0.0,
+        }
+        agent_mod.reset_wait_state()
+        with mock.patch("reciproca.telegram_bot._render") as render:
+            turn = asyncio.run(tb._run_turn(app, 42, "come va?", SessionMemory()))
+        self.assertEqual(len(turn), 6)  # 5 polls + the forced closing line
+        closing = turn[-1]
+        self.assertIsInstance(closing, AIMessage)
+        self.assertIn("2/5", closing.content)
+
+    def test_the_redirected_wait_still_reports_the_task_status(self):
+        # The bot installs the status watcher the same way the REPL does:
+        # the redirected wait must wake on a status change too, with the
+        # user message and the status line both visible.
+        tb._install_telegram_wait()
+        watch = agent_mod.StatusWatch()
+        watch.update("Task a1b2 (follow_cycle): 2/5")
+        agent_mod.set_status_provider(watch.read)
+        try:
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep:
+                result = agent_mod.wait.invoke({"seconds": 1})
+        finally:
+            agent_mod.set_status_provider(None)
+        self.assertIn("Task a1b2", result)
+        self.assertIn("2/5", result)
+        sleep.assert_called()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import warnings
 
 # pydantic-settings (a transitive dep of the mcp SDK) warns once about a
@@ -42,6 +43,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from reciproca import config
 from reciproca.agent import agent as agent_mod
 from reciproca.agent.config import load_settings
+from reciproca.agent.memory import SessionMemory
 from reciproca.agent.provider import make_llm
 
 
@@ -124,23 +126,77 @@ def render(message):
         _tool_logger().info("📦 %s", content)
 
 
-async def _run(messages, agent):
+async def _run(messages, agent, activity=None, watch=None):
     """Stream one goal through the agent, printing each new message.
 
     Must run inside the caller's event loop: the MCP tools are bound to the
     session's loop, and a fresh asyncio.run() loop could never reach them.
-    Returns the turn's last message, so the REPL can decide what the next
-    turn may refer to.
+    Returns the turn's full message list, so the runner can record it in
+    the conversation memory (SessionMemory.record_turn).
+
+    Backstop: if the model keeps polling (wait, cycle_status, status,
+    logs_tail) without ever narrating, the stale counter climbs; past the
+    cap the runner closes the turn itself with the current status line.
+    The running cycle is untouched (it lives in the server), only this
+    turn ends - so the user gets their prompt back and a stalled model
+    cannot pin the conversation forever.
     """
     printed = set()
-    last = None
+    turn_messages = []
+    forced_end = False
     async for step in agent.astream({"messages": messages}, stream_mode="values"):
         message = step["messages"][-1]
-        last = message
+        turn_messages.append(message)
         if message.id not in printed:
             printed.add(message.id)
+            if isinstance(message, AIMessage):
+                if message.content:
+                    # A narration breaks a stale sequence and refreshes the
+                    # push monitor's silence clock.
+                    agent_mod.reset_wait_state()
+                    if activity is not None:
+                        activity["last_narration"] = time.monotonic()
+                elif message.tool_calls and agent_mod.note_stale_tool_calls(
+                        message.tool_calls):
+                    forced_end = True
+                    break
             render(message)
-    return last
+    if forced_end:
+        line = watch.read()[1] if watch else None
+        closing = AIMessage(content=line or agent_mod.FALLBACK_CLOSING)
+        turn_messages.append(closing)
+        if activity is not None:
+            activity["last_narration"] = time.monotonic()
+        render(closing)
+    return turn_messages
+
+
+async def _status_push(watch, activity):
+    """Print a status line when the agent narrates nothing for a while.
+
+    The guarantee for a stalled turn: even if the model never reports, the
+    user still sees where the running task is. Throttled - at most one line
+    per 30 seconds, and only after 45 seconds of narration silence.
+    """
+    last_push = 0.0
+    warned = False
+    while True:
+        await asyncio.sleep(10)
+        # The push must never die either: a hiccup here is exactly the
+        # silence this loop exists to prevent.
+        try:
+            _, line = watch.read()
+            if not line:
+                continue
+            now = time.monotonic()
+            if now - activity["last_narration"] > 45 and now - last_push > 30:
+                last_push = now
+                print(f"\n📊 {line}", flush=True)
+        except Exception as e:
+            if not warned:
+                warned = True
+                print(f"(status push skipped a tick: {e})",
+                      file=sys.stderr, flush=True)
 
 
 async def _amain():
@@ -168,27 +224,46 @@ async def _amain():
         tools = await load_mcp_tools(session)
         agent = agent_mod.build_agent(llm, tools, autonomous=args.autonomous)
 
-        if args.say:
-            await _run([("user", args.say)], agent)
-            return
+        # The conversation memory and the task-status watcher: the memory
+        # gives every turn the context of the previous ones (and the "si"
+        # its referent); the watcher feeds the wait tool the running task's
+        # status, so waiting is checking and updates flow on their own.
+        watch = agent_mod.StatusWatch()
+        agent_mod.set_status_provider(watch.read)
+        memory = SessionMemory()
+        activity = {"last_narration": time.monotonic()}
+        poller = asyncio.create_task(agent_mod.status_monitor(session, watch))
+        pusher = asyncio.create_task(_status_push(watch, activity))
+        try:
+            if args.say:
+                turn = await _run(memory.context_messages(args.say), agent,
+                                  activity, watch)
+                memory.record_turn(args.say, turn)
+                return
 
-        print(WELCOME)
-        last = None
-        while True:
-            try:
-                line = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nBye - il browser e il server MCP si chiudono; un ciclo ancora in corso si ferma qui.")
-                return
-            if not line:
-                continue
-            if line.lower() in ("quit", "exit"):
-                return
-            # One fresh request per turn: feeding the whole conversation back
-            # made the agent re-run requests that were already completed. Only
-            # a pending question from the agent survives, so a plain "si"/"ok"
-            # after a confirmation checkpoint still resolves (turn_context).
-            last = await _run(agent_mod.turn_context(last) + [("user", line)], agent)
+            print(WELCOME)
+            while True:
+                try:
+                    line = input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nBye - il browser e il server MCP si chiudono; un ciclo ancora in corso si ferma qui.")
+                    return
+                if not line:
+                    continue
+                if line.lower() in ("quit", "exit"):
+                    return
+                # One fresh request per turn - but never a blind one: the
+                # memory block hands the turn the previous conversation, and
+                # a bare "si"/"ok" gets its pending question injected
+                # explicitly, so the confirmation is never forgotten.
+                agent_mod.reset_wait_state()
+                turn = await _run(memory.context_messages(line), agent,
+                                  activity, watch)
+                memory.record_turn(line, turn)
+        finally:
+            poller.cancel()
+            pusher.cancel()
+            agent_mod.set_status_provider(None)
 
 
 def main():

@@ -19,6 +19,13 @@ wait exactly like a typed command does in the REPL: the wait returns the
 text as "the user typed", the agent acts on it in the running turn, and
 the message is not re-processed as a separate turn. Messages that arrive
 while the agent is not waiting are queued and become the next turn.
+
+The wait doubles as the monitor: it reports the running task's status and
+wakes up when the status changes, so the agent narrates progress on its
+own. If it falls silent while a task runs, the bot sends the status line
+directly - the user never has to ask for an update. Each chat has its own
+conversation memory, so a bare "si"/"ok" resolves the pending question of
+the previous turn instead of being forgotten.
 """
 
 import argparse
@@ -60,6 +67,7 @@ from reciproca import config
 from reciproca.agent import agent as agent_mod
 from reciproca.agent.__main__ import WELCOME, _tool_logger
 from reciproca.agent.config import load_settings as load_agent_settings
+from reciproca.agent.memory import SessionMemory
 from reciproca.agent.provider import make_llm
 from reciproca.config import data_path
 
@@ -303,24 +311,47 @@ async def _render(app, message):
         _tool_logger().info("📦 %s", content)
 
 
-async def _run_turn(app, chat_id, text):
+async def _run_turn(app, chat_id, text, memory):
     """Stream one goal through the agent, sending narration to the chat.
 
     Same shape as the REPL's _run: stream_mode="values", each new message
-    rendered once. Returns the turn's last message for turn_context.
+    rendered once. The turn opens with the conversation memory (so a "si"
+    resolves its pending question) and returns the turn's message list for
+    the memory to record.
     """
-    app.bot_data["turn_chat_id"] = chat_id
+    S = app.bot_data
+    S["turn_chat_id"] = chat_id
     printed = set()
-    last = None
-    messages = agent_mod.turn_context(app.bot_data["last"]) + [("user", text)]
-    async for step in app.bot_data["agent"].astream({"messages": messages},
-                                                    stream_mode="values"):
+    turn_messages = []
+    forced_end = False
+    messages = memory.context_messages(text)
+    async for step in S["agent"].astream({"messages": messages},
+                                         stream_mode="values"):
         message = step["messages"][-1]
-        last = message
+        turn_messages.append(message)
         if message.id not in printed:
             printed.add(message.id)
+            if isinstance(message, AIMessage):
+                if message.content:
+                    # A narration breaks a stale sequence and refreshes the
+                    # push monitor's silence clock.
+                    agent_mod.reset_wait_state()
+                    S["last_narration_at"] = time.monotonic()
+                elif message.tool_calls and agent_mod.note_stale_tool_calls(
+                        message.tool_calls):
+                    # Past the stall cap: close the turn ourselves with the
+                    # current status line, so the chat stays responsive.
+                    # The running cycle lives in the server - it is untouched.
+                    forced_end = True
+                    break
             await _render(app, message)
-    return last
+    if forced_end:
+        line = S["watch"].read()[1]
+        closing = AIMessage(content=line or agent_mod.FALLBACK_CLOSING)
+        turn_messages.append(closing)
+        S["last_narration_at"] = time.monotonic()
+        await _render(app, closing)
+    return turn_messages
 
 
 async def _turn_worker(app):
@@ -329,15 +360,49 @@ async def _turn_worker(app):
     The MCP session, the browser and the cycle registry are all single, so
     two turns at once could never work; the queue serializes them. While a
     turn runs, new messages stay queued - or interrupt the wait, if the
-    agent is sleeping.
+    agent is sleeping. Each chat has its own conversation memory.
     """
+    S = app.bot_data
     while True:
         chat_id, text = await asyncio.to_thread(_pending.get)
+        memory = S["memories"].get(chat_id) or SessionMemory()
+        S["memories"][chat_id] = memory
+        agent_mod.reset_wait_state()
         try:
-            app.bot_data["last"] = await _run_turn(app, chat_id, text)
+            turn = await _run_turn(app, chat_id, text, memory)
+            memory.record_turn(text, turn)
         except Exception as e:
             _tool_logger().warning("turn failed: %s", e)
             await _safe_send(app, chat_id, f"⚠️ La richiesta è fallita: {e}")
+
+
+async def _push_loop(app):
+    """The guarantee: status lines reach the chat even when the model is
+    silent. When the agent narrates nothing for a while while a task runs,
+    the running task's status line is sent directly - throttled to one per
+    30 seconds, like the log forwarder.
+    """
+    S = app.bot_data
+    last_push = 0.0
+    warned = False
+    while True:
+        await asyncio.sleep(10)
+        # The push must never die either: a hiccup here is exactly the
+        # silence this loop exists to prevent.
+        try:
+            _, line = S["watch"].read()
+            if not line:
+                continue
+            now = time.monotonic()
+            if now - S["last_narration_at"] > 45 and now - last_push > 30:
+                last_push = now
+                chat_id = S.get("turn_chat_id") or (S["bot_settings"]["allowed_chat_ids"] or [None])[0]
+                if chat_id is not None:
+                    await _safe_send(app, chat_id, f"📊 {line}")
+        except Exception as e:
+            if not warned:
+                warned = True
+                _tool_logger().warning("push loop hiccup: %s", e)
 
 
 # --- Telegram handlers ------------------------------------------------------
@@ -404,6 +469,13 @@ async def _hold_session(app):
                 S["llm"], tools, autonomous=S["autonomous"])
             S["log_forwarder"] = LogForwarder(config.LOG_FILE)
             _install_telegram_wait()
+            # The task-status watcher: the poller keeps the wait tool's
+            # snapshot fresh (so a wait wakes on status changes) and the
+            # pusher sends status lines when the model narrates nothing.
+            agent_mod.set_status_provider(S["watch"].read)
+            S["monitor"] = asyncio.create_task(
+                agent_mod.status_monitor(session, S["watch"]))
+            S["pusher"] = asyncio.create_task(_push_loop(app))
             S["worker"] = asyncio.create_task(_turn_worker(app))
             S["forwarder"] = asyncio.create_task(_forward_loop(app))
             for chat_id in S["bot_settings"]["allowed_chat_ids"]:
@@ -416,6 +488,8 @@ async def _hold_session(app):
         S["error"] = e
         S["ready"].set()
         raise
+    finally:
+        agent_mod.set_status_provider(None)
 
 
 async def _post_init(app):
@@ -433,7 +507,7 @@ async def _post_init(app):
 async def _post_shutdown(app):
     """Stop the background tasks and wake the holder to close the session."""
     S = app.bot_data
-    for key in ("worker", "forwarder"):
+    for key in ("worker", "forwarder", "monitor", "pusher"):
         if S.get(key):
             S[key].cancel()
     if S.get("shutdown"):
@@ -504,8 +578,12 @@ def main():
     S["log_forwarder"] = None
     S["worker"] = None
     S["forwarder"] = None
+    S["monitor"] = None
+    S["pusher"] = None
     S["holder"] = None
-    S["last"] = None
+    S["watch"] = agent_mod.StatusWatch()
+    S["memories"] = {}
+    S["last_narration_at"] = 0.0
     S["turn_chat_id"] = None
 
     app.add_handler(CommandHandler("start", _on_start))

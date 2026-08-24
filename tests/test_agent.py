@@ -8,6 +8,7 @@ path the REPL takes at startup.
 Requires the agent stack (requirements-agent.txt); the integration class is
 skipped when it is not installed.
 """
+import asyncio
 import logging
 import os
 import sys
@@ -16,6 +17,8 @@ import unittest
 from unittest import mock
 
 import _stubs  # noqa: F401
+
+from langchain_core.messages import AIMessage
 
 from reciproca import config
 from reciproca.agent import agent as agent_mod
@@ -115,6 +118,16 @@ class ProviderTest(unittest.TestCase):
 
 
 class AgentAssemblyTest(unittest.TestCase):
+    def setUp(self):
+        # The wait tool's stale-wait counter is module state; a test that
+        # calls wait four or five times must start from a clean slate.
+        agent_mod.reset_wait_state()
+        agent_mod.set_status_provider(None)
+
+    def tearDown(self):
+        agent_mod.reset_wait_state()
+        agent_mod.set_status_provider(None)
+
     def test_the_prompt_carries_the_engine_and_checkpoint_rules(self):
         self.assertIn("task_id", agent_mod.SYSTEM_PROMPT)
         self.assertIn("confirm with the user", agent_mod.SYSTEM_PROMPT)
@@ -191,6 +204,235 @@ class AgentAssemblyTest(unittest.TestCase):
                       agent_mod.SYSTEM_PROMPT)
         self.assertIn("ends early when the user types a command",
                       agent_mod.SYSTEM_PROMPT_AUTONOMOUS)
+
+    def test_the_prompt_ties_waiting_to_monitoring(self):
+        # The wait doubles as the monitor: its result carries the task's
+        # status, and the model must narrate changes instead of waiting
+        # silently - this is what keeps local models from wait-abusing.
+        self.assertIn("reports the running task's status", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("status line", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("narrate it in one short line", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("the user never needs to ask for an update",
+                      agent_mod.SYSTEM_PROMPT)
+
+    def test_the_prompt_carries_the_memory_and_confirmation_rules(self):
+        # The "Conversation memory" block is background, not a request;
+        # a bare confirmation (English or Italian) answers the open
+        # question in it.
+        self.assertIn("Conversation memory", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("never re-run what it marks as done", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("bare confirmation", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("in English or Italian", agent_mod.SYSTEM_PROMPT)
+        self.assertIn("never ask the user to restate it", agent_mod.SYSTEM_PROMPT)
+
+    def test_the_prompt_orders_reporting_done_and_stopping(self):
+        self.assertIn("communicate the result and stop polling",
+                      agent_mod.SYSTEM_PROMPT)
+
+    def test_the_wait_tool_reports_the_task_status(self):
+        from reciproca.agent.agent import wait
+
+        watch = agent_mod.StatusWatch()
+        watch.update("Task a1b2 (follow_cycle): 2/5 - last: followed @user")
+        agent_mod.set_status_provider(watch.read)
+        try:
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                    mock.patch("reciproca.agent.agent._read_pending_input",
+                               return_value=None):
+                result = wait.invoke({"seconds": 1})
+        finally:
+            agent_mod.set_status_provider(None)
+        self.assertIn("Task a1b2", result)
+        self.assertIn("2/5", result)
+        sleep.assert_called()
+
+    def test_the_wait_wakes_on_a_status_change(self):
+        from reciproca.agent.agent import wait
+
+        # The poller bumps the generation during the wait: the wait must end
+        # at once and hand the new line back, not sleep the whole duration.
+        states = iter([(0, None), (1, "Task a1b2: 2/5 - ultimo: followed @user")])
+        agent_mod.set_status_provider(lambda: next(states))
+        try:
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                    mock.patch("reciproca.agent.agent._read_pending_input",
+                               return_value=None):
+                result = wait.invoke({"seconds": 60})
+        finally:
+            agent_mod.set_status_provider(None)
+        self.assertIn("status update", result)
+        self.assertIn("2/5", result)
+        self.assertLess(len(sleep.call_args_list), 60)
+
+    def test_a_user_command_beats_a_status_change(self):
+        from reciproca.agent.agent import wait
+
+        watch = agent_mod.StatusWatch()
+        agent_mod.set_status_provider(watch.read)
+        try:
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                    mock.patch("reciproca.agent.agent._read_pending_input",
+                               return_value="fermati\n"):
+                result = wait.invoke({"seconds": 60})
+        finally:
+            agent_mod.set_status_provider(None)
+        self.assertIn("the user typed: fermati", result)
+        sleep.assert_not_called()
+
+    def test_stale_waits_are_capped(self):
+        from reciproca.agent.agent import wait
+
+        with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                mock.patch("reciproca.agent.agent._read_pending_input",
+                           return_value=None):
+            for _ in range(4):
+                wait.invoke({"seconds": 1})  # nothing changes: allowed
+            blocked = wait.invoke({"seconds": 1})  # the fifth is refused
+        self.assertIn("already waited 4 times", blocked)
+        self.assertIn("Stop waiting", blocked)
+
+    def test_an_informative_return_resets_the_stale_counter(self):
+        from reciproca.agent.agent import wait
+
+        watch = agent_mod.StatusWatch()
+        agent_mod.set_status_provider(watch.read)
+        try:
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                    mock.patch("reciproca.agent.agent._read_pending_input",
+                               return_value="si\n"):
+                wait.invoke({"seconds": 1})  # a user message: resets
+            with mock.patch("reciproca.agent.agent.time.sleep") as sleep, \
+                    mock.patch("reciproca.agent.agent._read_pending_input",
+                               return_value=None):
+                # Four more no-change waits are allowed again: the counter
+                # did not carry over.
+                for _ in range(4):
+                    wait.invoke({"seconds": 1})
+                blocked = wait.invoke({"seconds": 1})
+        finally:
+            agent_mod.set_status_provider(None)
+        self.assertIn("already waited 4 times", blocked)
+
+    def test_silent_read_polls_count_as_stalls_and_a_real_action_resets(self):
+        # The wait is not the only way a model can stall: polling with
+        # read-only tools without ever narrating must hit the same cap.
+        agent_mod.reset_wait_state()
+        read = lambda: agent_mod.note_stale_tool_calls(
+            [{"name": "cycle_status", "args": {}, "id": "c", "type": "tool_call"}])
+        for _ in range(4):
+            self.assertFalse(read())   # under the cap: allowed
+        self.assertTrue(read())         # past the cap: close the turn
+
+        # A real action breaks the streak and starts the counter over.
+        self.assertFalse(agent_mod.note_stale_tool_calls(
+            [{"name": "follow_cycle", "args": {}, "id": "a", "type": "tool_call"}]))
+        for _ in range(4):
+            self.assertFalse(read())
+        self.assertTrue(read())
+
+    def test_run_closes_a_silent_polling_turn_with_the_status_line(self):
+        # The REPL runner's backstop: five silent read polls in a row end
+        # the turn with the current status line, so the user gets the
+        # prompt back and a stalled model cannot pin the conversation.
+        from reciproca.agent import __main__ as repl
+
+        class FakeAgent:
+            def __init__(self, messages):
+                self._messages = messages
+
+            async def astream(self, config, stream_mode=None):
+                for m in self._messages:
+                    yield {"messages": [m]}
+
+        agent_mod.reset_wait_state()
+        polls = [
+            AIMessage(id=f"m{i}", content="", tool_calls=[
+                {"name": "cycle_status", "args": {}, "id": f"c{i}",
+                 "type": "tool_call"}])
+            for i in range(5)
+        ]
+        watch = agent_mod.StatusWatch()
+        watch.update("Task a1b2 (follow_cycle): 2/5")
+        with mock.patch("reciproca.agent.__main__.render"):
+            turn = asyncio.run(repl._run(
+                [("user", "come va la sessione?")], FakeAgent(polls), watch=watch))
+        self.assertEqual(len(turn), 6)  # 5 polls + the forced closing line
+        closing = turn[-1]
+        self.assertIsInstance(closing, AIMessage)
+        self.assertIn("2/5", closing.content)
+
+    def test_a_narration_or_a_real_action_breaks_the_silent_streak(self):
+        # The backstop must never fire for a turn that is actually
+        # communicating: a narration resets the counter, and so does a
+        # real action, so multi-phase turns are never cut off.
+        from reciproca.agent import __main__ as repl
+
+        class FakeAgent:
+            def __init__(self, messages):
+                self._messages = messages
+
+            async def astream(self, config, stream_mode=None):
+                for m in self._messages:
+                    yield {"messages": [m]}
+
+        def poll(i):
+            return AIMessage(id=f"m{i}", content="", tool_calls=[
+                {"name": "cycle_status", "args": {}, "id": f"c{i}",
+                 "type": "tool_call"}])
+
+        agent_mod.reset_wait_state()
+        messages = [poll(0), poll(1),
+                    AIMessage(id="m-nar", content="Sono al 40%"),
+                    poll(3), poll(4), poll(5), poll(6)]
+        with mock.patch("reciproca.agent.__main__.render"):
+            turn = asyncio.run(repl._run(
+                [("user", "vai")], FakeAgent(messages)))
+        self.assertEqual(len(turn), 7)  # nothing forced: no closing line
+
+        agent_mod.reset_wait_state()
+        messages = [poll(10), poll(11),
+                    AIMessage(id="m-act", content="", tool_calls=[
+                        {"name": "follow_cycle", "args": {}, "id": "a1",
+                         "type": "tool_call"}]),
+                    poll(13), poll(14), poll(15), poll(16)]
+        with mock.patch("reciproca.agent.__main__.render"):
+            turn = asyncio.run(repl._run(
+                [("user", "vai")], FakeAgent(messages)))
+        self.assertEqual(len(turn), 7)  # the action reset the counter
+
+    def test_status_line_builds_readable_lines(self):
+        line = agent_mod.status_line({
+            "task_id": "a1b2", "kind": "follow_cycle", "state": "running",
+            "progress": {"done": 2, "total": 5, "current": "@user"},
+        })
+        self.assertIn("a1b2", line)
+        self.assertIn("2/5", line)
+        self.assertIn("@user", line)
+
+        done = agent_mod.status_line({
+            "task_id": "a1b2", "kind": "follow_cycle", "state": "done",
+            "result": {"followed": 5, "skipped": 2, "errors": 0},
+        })
+        self.assertIn("completed", done)
+        self.assertIn("followed=5", done)
+
+        error = agent_mod.status_line({
+            "task_id": "a1b2", "kind": "follow_cycle", "state": "running",
+            "error": "rate_limited",
+        })
+        self.assertIn("failed", error)
+
+    def test_status_line_falls_back_to_the_last_log_line(self):
+        line = agent_mod.status_line({
+            "task_id": "a1b2", "kind": "follow_cycle", "state": "running",
+            "progress": None,
+            "last_logs": [{"time": 1, "level": "INFO", "message": "followed @user"}],
+        })
+        self.assertIn("followed @user", line)
+
+    def test_status_line_rejects_garbage(self):
+        self.assertIsNone(agent_mod.status_line(None))
+        self.assertIsNone(agent_mod.status_line("not a snapshot"))
 
     def test_the_prompt_marks_each_user_message_as_fresh(self):
         # With the full conversation in context the agent re-ran completed
@@ -279,6 +521,60 @@ class AgentAssemblyTest(unittest.TestCase):
 
 
 @unittest.skipIf(MultiServerMCPClient is None, "agent stack not installed")
+class LogIsolationTest(unittest.TestCase):
+    def test_the_test_suite_logs_outside_the_real_app_log(self):
+        # _stubs redirects RECIPROCA_LOG_FILE before reciproca is imported:
+        # a test run must never write into the log the agent reads through
+        # logs_tail. When it did (the "mario.rossi" fixture sessions), the
+        # agent reported phantom logins and artificial errors as if they
+        # had really happened.
+        self.assertEqual(config.LOG_FILE,
+                         os.path.join(_stubs.TEST_LOG_DIR, "follow_bot.log"))
+        self.assertIn("reciproca-tests-", config.LOG_FILE)
+
+
+class StatusMonitorResilienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_bad_poll_or_snapshot_never_kills_the_monitor(self):
+        # The monitor is what wakes the wait on every change: if it dies,
+        # the turn hangs silent. A raising poll and a malformed snapshot
+        # must be skipped, never fatal.
+        watch = agent_mod.StatusWatch()
+        calls = {"n": 0}
+
+        async def fake_snapshot(session):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("server hiccup")
+            if calls["n"] == 2:
+                # last_logs as a list of strings: the old key building
+                # would crash on ".get" and kill the monitor here.
+                return {"task_id": "a1b2", "kind": "follow_cycle",
+                        "state": "running", "progress": None,
+                        "last_logs": ["not a dict"]}
+            if calls["n"] == 3:
+                # A None snapshot is what cycle_status answers with an
+                # error looks like: the monitor must skip it, not crash
+                # on snapshot.get while building the key.
+                return None
+            return {"task_id": "a1b2", "kind": "follow_cycle",
+                    "state": "running", "progress": {"done": 1, "total": 5},
+                    "last_logs": [{"message": "followed @user"}]}
+
+        with mock.patch.object(agent_mod, "_current_task_snapshot",
+                               fake_snapshot):
+            task = asyncio.create_task(agent_mod.status_monitor(
+                session=None, watch=watch, interval=0.001))
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        # The monitor survived both bad ticks and delivered the real status.
+        generation, line = watch.read()
+        self.assertGreater(generation, 0)
+        self.assertIsNotNone(line)
+        self.assertIn("1/5", line)
+
+
 class AgentIntegrationTest(unittest.TestCase):
     """The REPL's startup path: tools loaded from the live server over stdio."""
 
@@ -296,6 +592,28 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertIn("cycle_status", names)
         self.assertIn("config_reload", names)
         self.assertGreater(len(names), 25, "the full tool surface is exposed")
+
+    def test_status_snapshot_reads_the_live_server(self):
+        import asyncio
+
+        async def go():
+            client = MultiServerMCPClient(agent_mod.mcp_connections())
+            async with client.session("reciproca") as session:
+                # No task runs in the test: the snapshot is None (idle) and
+                # the monitor keeps the watch untouched.
+                snapshot = await agent_mod._current_task_snapshot(session)
+                watch = agent_mod.StatusWatch()
+                monitor = asyncio.create_task(
+                    agent_mod.status_monitor(session, watch, interval=1.0))
+                await asyncio.sleep(2.5)
+                monitor.cancel()
+                await asyncio.sleep(0)
+                return snapshot, watch.read()
+
+        snapshot, (generation, line) = asyncio.run(go())
+        self.assertIsNone(snapshot)
+        self.assertEqual((generation, line), (0, None),
+                         "idle: the watch must stay untouched")
 
 
 if __name__ == "__main__":

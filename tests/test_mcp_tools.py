@@ -184,6 +184,50 @@ class MCPToolTest(unittest.TestCase):
         result = ms.hashtags_add([])
         self.assertFalse(result["ok"])
 
+    def test_hashtags_add_accepts_a_comma_string(self):
+        # Local models sometimes answer the JSON tool call with a bare
+        # string; the tool must split it instead of corrupting the file
+        # character by character (which is what the old code did).
+        result = ms.hashtags_add("casa, mare")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["hashtags"], ["casa", "mare"])
+        self.assertEqual(ms.hashtags_list()["hashtags"], ["casa", "mare"])
+
+    def test_hashtags_add_parses_a_json_list_string(self):
+        result = ms.hashtags_add('["#art", "#photo"]')
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["hashtags"], ["#art", "#photo"])
+
+    def test_hashtags_add_a_single_string_is_one_tag(self):
+        result = ms.hashtags_add("#casa")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["hashtags"], ["#casa"])
+
+    def test_hashtags_add_rejects_a_json_object_string(self):
+        result = ms.hashtags_add('{"tag": "casa"}')
+        self.assertFalse(result["ok"])
+        self.assertEqual(ms.hashtags_list()["hashtags"], [])
+
+    def test_hashtags_add_unwraps_a_single_key_object(self):
+        # Weak local tool calling emits list items as {"text": x}; the
+        # single-key object is unwrapped so the saved file stays clean.
+        result = ms.hashtags_add([{"text": "analog"}])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["hashtags"], ["analog"])
+        self.assertEqual(ms.hashtags_list()["hashtags"], ["analog"])
+
+    def test_hashtags_add_rejects_an_ambiguous_object(self):
+        result = ms.hashtags_add([{"a": "x", "b": "y"}])
+        self.assertFalse(result["ok"])
+        self.assertEqual(ms.hashtags_list()["hashtags"], [],
+                         "a malformed call must not touch the saved file")
+
+    def test_hashtags_add_rejects_a_non_string_value(self):
+        result = ms.hashtags_add([{"text": 42}])
+        self.assertFalse(result["ok"])
+        self.assertEqual(ms.hashtags_list()["hashtags"], [],
+                         "a malformed call must not touch the saved file")
+
     # --------------------------------------------------------------- queue
 
     def test_queue_roundtrip(self):
@@ -207,6 +251,22 @@ class MCPToolTest(unittest.TestCase):
 
         ms.queue_clear()
         self.assertEqual(ms.queue_list()["total"], 0)
+
+    def test_queue_add_unwraps_a_single_key_object(self):
+        # Same weak tool calling as hashtags: {"text": "alice"} must land in
+        # the queue as "alice", never as the string of the object.
+        added = ms.queue_add([{"text": "alice"}, "bob"])
+        self.assertTrue(added["ok"])
+        self.assertEqual(added["added"], 2)
+        usernames = {entry["username"] for entry in ms.queue_list()["queue"]}
+        self.assertEqual(usernames, {"alice", "bob"})
+        ms.queue_clear()
+
+    def test_queue_add_rejects_an_ambiguous_object(self):
+        result = ms.queue_add([{"a": "x", "b": "y"}])
+        self.assertFalse(result["ok"])
+        self.assertEqual(ms.queue_list()["total"], 0,
+                         "a malformed call must not touch the queue")
 
     def test_queue_list_exposes_frequency_and_combined_rank(self):
         """The agent must see why a candidate ranks where it does: the order
@@ -317,6 +377,14 @@ class MCPToolTest(unittest.TestCase):
         result = ms.config_set("DEFAULT_DELAY_MAX", "10")
         self.assertTrue(result["ok"])
         self.assertEqual(R.config.CONFIG["DEFAULT_DELAY_MAX"], 10)
+
+    def test_config_set_rejects_a_json_looking_text_value(self):
+        # Local models sometimes pass a JSON structure where a plain text
+        # value belongs; the tool must refuse it, not store the garbage.
+        result = ms.config_set("SEMANTIC_NICHE", '{"niche": "fotografia"}')
+        self.assertFalse(result["ok"])
+        self.assertIn("JSON", result["error"])
+        self.assertEqual(R.config.CONFIG["SEMANTIC_NICHE"], "")
 
     def test_config_reset_restores_defaults(self):
         R.config.CONFIG["DEFAULT_DELAY_MIN"] = 99
