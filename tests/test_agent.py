@@ -616,5 +616,91 @@ class AgentIntegrationTest(unittest.TestCase):
                          "idle: the watch must stay untouched")
 
 
+class StatusPusherTest(unittest.TestCase):
+    """The shared push logic: a status line is reported at most once, and
+    a task finishing while no turn runs wakes the agent up (the bug it
+    fixes: the 'completed' line was re-sent every ~30s forever)."""
+
+    def setUp(self):
+        self.pusher = agent_mod.StatusPusher()
+        self.now = 1000.0
+
+    def test_a_line_is_pushed_once(self):
+        line = "Task t1 (follow): 2/5"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "push")
+        # the same line again, however long later: never repeated
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now + 600), "skip")
+
+    def test_a_final_line_wakes_up_once(self):
+        line = "Task t1 (follow) completed - followed=40"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "wakeup")
+        # the wake-up (and the line) are never repeated
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now + 600),
+                         "skip")
+
+    def test_busy_with_fresh_narration_marks_the_line_seen(self):
+        line = "Task t1 (follow): 2/5"
+        # the model is narrating right now: the line is already covered
+        self.assertEqual(self.pusher.tick(line, True, self.now - 10, self.now),
+                         "skip")
+        # and once the turn ends it is not re-sent either
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now + 100),
+                         "skip")
+
+    def test_busy_but_silent_still_pushes(self):
+        # the model has not narrated for over the silence window: the
+        # guarantee kicks in even mid-turn
+        line = "Task t1 (follow): 2/5"
+        self.assertEqual(self.pusher.tick(line, True, self.now - 60, self.now),
+                         "push")
+
+    def test_throttle_skips_a_line_pushed_recently(self):
+        line = "Task t1 (follow): 2/5"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "push")
+        # a new line within the throttle window: held back
+        other = "Task t1 (follow): 3/5"
+        self.assertEqual(self.pusher.tick(other, False, 0.0, self.now + 10),
+                         "skip")
+        # after the window it goes out
+        self.assertEqual(self.pusher.tick(other, False, 0.0, self.now + 31),
+                         "push")
+
+    def test_final_line_while_idle_wakes_the_agent(self):
+        line = "Task t1 (follow) completed - followed=40, skipped=12"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "wakeup")
+
+    def test_failed_line_while_idle_wakes_the_agent(self):
+        line = "Task t1 (follow) failed: rate_limited"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "wakeup")
+
+    def test_progress_line_while_idle_is_a_plain_push(self):
+        line = "Task t1 (follow): 2/5"
+        self.assertEqual(self.pusher.tick(line, False, 0.0, self.now), "push")
+
+    def test_final_line_while_busy_is_a_plain_push(self):
+        # the turn is running: the model will narrate the result itself,
+        # no wake-up needed - but the silent-turn guarantee still applies
+        line = "Task t1 (follow) completed"
+        self.assertEqual(self.pusher.tick(line, True, self.now - 60, self.now),
+                         "push")
+
+    def test_is_final_status_only_for_the_task_tag(self):
+        self.assertTrue(agent_mod.is_final_status(
+            "Task t1 (follow) completed - followed=40"))
+        self.assertTrue(agent_mod.is_final_status(
+            "Task t1 (follow) failed: rate_limited"))
+        self.assertFalse(agent_mod.is_final_status("Task t1 (follow): 2/5"))
+        # a running task whose last log line mentions "completed"
+        # must not look final
+        self.assertFalse(agent_mod.is_final_status(
+            "Task t1 (follow) in progress - last: completed the login"))
+        self.assertFalse(agent_mod.is_final_status(None))
+
+    def test_wakeup_message_carries_the_result_line(self):
+        msg = agent_mod.wakeup_message("Task t1 (queue_score) completed - 120")
+        self.assertIn("Task t1 (queue_score) completed - 120", msg)
+        self.assertIn("Riferisci il risultato", msg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

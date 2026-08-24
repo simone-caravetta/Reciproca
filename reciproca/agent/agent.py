@@ -166,6 +166,66 @@ class StatusWatch:
         self._state = (generation + 1, line)
 
 
+def is_final_status(line):
+    """True for the one-liners status_line produces when a task ends.
+
+    Matched on the ") completed"/") failed" suffix of the task tag, not on
+    the bare words: a running task whose last log line says "...completed
+    something..." must not look final.
+    """
+    return bool(line) and (") completed" in line or ") failed" in line)
+
+
+def wakeup_message(line):
+    """The synthetic user request that wakes the agent when a task
+    finishes while no turn is running (see StatusPusher)."""
+    return (f"Un task è appena terminato: {line}. Riferisci il risultato "
+            "all'utente in una o due righe concise.")
+
+
+class StatusPusher:
+    """The shared status-push logic for the REPL and the Telegram frontend.
+
+    A status line is pushed at most once - the "completed" line of a
+    finished task is never repeated every 30 seconds like it used to.
+    While a turn runs, the model's own narrations count as the push (a
+    fresh narration marks the current line as already reported); a silent
+    turn still gets the line after `silence` seconds. A task that finishes
+    while NO turn is running reports the line AND wakes the agent up, so
+    the result gets narrated, not just displayed.
+    """
+
+    def __init__(self, silence=45.0, throttle=30.0):
+        self.silence = silence
+        self.throttle = throttle
+        self.last_printed = None
+        self.last_push = 0.0
+
+    def tick(self, line, busy, last_narration_at, now):
+        """Decide what to do with the current status line.
+
+        Returns "skip" (nothing new), "push" (send the line), or "wakeup"
+        (send the line AND wake the agent: the task just finished while
+        no turn was running).
+        """
+        if not line:
+            return "skip"
+        if line == self.last_printed:
+            return "skip"
+        if busy and now - last_narration_at < self.silence:
+            # The agent is talking: the current line is already covered by
+            # its narration, so mark it reported and stay quiet.
+            self.last_printed = line
+            return "skip"
+        if now - self.last_push < self.throttle:
+            return "skip"
+        self.last_printed = line
+        self.last_push = now
+        if not busy and is_final_status(line):
+            return "wakeup"
+        return "push"
+
+
 def status_line(snapshot):
     """One readable line for a task, from a cycle_status snapshot.
 

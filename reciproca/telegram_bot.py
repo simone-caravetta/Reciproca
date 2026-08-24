@@ -368,22 +368,28 @@ async def _turn_worker(app):
         memory = S["memories"].get(chat_id) or SessionMemory()
         S["memories"][chat_id] = memory
         agent_mod.reset_wait_state()
+        S["busy"] = True
         try:
             turn = await _run_turn(app, chat_id, text, memory)
             memory.record_turn(text, turn)
         except Exception as e:
             _tool_logger().warning("turn failed: %s", e)
             await _safe_send(app, chat_id, f"⚠️ La richiesta è fallita: {e}")
+        finally:
+            S["busy"] = False
 
 
 async def _push_loop(app):
     """The guarantee: status lines reach the chat even when the model is
     silent. When the agent narrates nothing for a while while a task runs,
-    the running task's status line is sent directly - throttled to one per
-    30 seconds, like the log forwarder.
+    the running task's status line is sent directly. A given line is sent
+    at most once - the "completed" line of a finished task is never
+    repeated - and when a task finishes while no turn is running, a
+    wake-up request is queued so the model narrates the result instead of
+    sitting idle (see StatusPusher).
     """
     S = app.bot_data
-    last_push = 0.0
+    pusher = agent_mod.StatusPusher()
     warned = False
     while True:
         await asyncio.sleep(10)
@@ -391,14 +397,18 @@ async def _push_loop(app):
         # silence this loop exists to prevent.
         try:
             _, line = S["watch"].read()
-            if not line:
+            verdict = pusher.tick(line, S.get("busy", False),
+                                  S["last_narration_at"], time.monotonic())
+            if verdict == "skip":
                 continue
-            now = time.monotonic()
-            if now - S["last_narration_at"] > 45 and now - last_push > 30:
-                last_push = now
-                chat_id = S.get("turn_chat_id") or (S["bot_settings"]["allowed_chat_ids"] or [None])[0]
-                if chat_id is not None:
-                    await _safe_send(app, chat_id, f"📊 {line}")
+            chat_id = S.get("turn_chat_id") or (S["bot_settings"]["allowed_chat_ids"] or [None])[0]
+            if chat_id is None:
+                continue
+            if verdict == "wakeup":
+                # The agent is idle: queue a synthetic request so the
+                # worker wakes it up and the result gets narrated.
+                _pending.put((chat_id, agent_mod.wakeup_message(line)))
+            await _safe_send(app, chat_id, f"📊 {line}")
         except Exception as e:
             if not warned:
                 warned = True
@@ -585,6 +595,7 @@ def main():
     S["memories"] = {}
     S["last_narration_at"] = 0.0
     S["turn_chat_id"] = None
+    S["busy"] = False
 
     app.add_handler(CommandHandler("start", _on_start))
     app.add_handler(CommandHandler("help", _on_start))

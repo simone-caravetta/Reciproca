@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import logging
+import select
 import sys
 import time
 import warnings
@@ -171,14 +172,17 @@ async def _run(messages, agent, activity=None, watch=None):
     return turn_messages
 
 
-async def _status_push(watch, activity):
+async def _status_push(watch, activity, wakeup_q):
     """Print a status line when the agent narrates nothing for a while.
 
     The guarantee for a stalled turn: even if the model never reports, the
-    user still sees where the running task is. Throttled - at most one line
-    per 30 seconds, and only after 45 seconds of narration silence.
+    user still sees where the running task is. A given status line is
+    printed at most once - the "completed" line of a finished task is
+    never repeated - and when a task finishes while no turn is running,
+    the line goes out AND a wake-up request is queued so the model
+    narrates the result instead of sitting idle (see StatusPusher).
     """
-    last_push = 0.0
+    pusher = agent_mod.StatusPusher()
     warned = False
     while True:
         await asyncio.sleep(10)
@@ -186,12 +190,13 @@ async def _status_push(watch, activity):
         # silence this loop exists to prevent.
         try:
             _, line = watch.read()
-            if not line:
+            verdict = pusher.tick(line, activity["busy"],
+                                  activity["last_narration"], time.monotonic())
+            if verdict == "skip":
                 continue
-            now = time.monotonic()
-            if now - activity["last_narration"] > 45 and now - last_push > 30:
-                last_push = now
-                print(f"\n📊 {line}", flush=True)
+            if verdict == "wakeup":
+                wakeup_q.put_nowait(agent_mod.wakeup_message(line))
+            print(f"\n📊 {line}", flush=True)
         except Exception as e:
             if not warned:
                 warned = True
@@ -231,9 +236,10 @@ async def _amain():
         watch = agent_mod.StatusWatch()
         agent_mod.set_status_provider(watch.read)
         memory = SessionMemory()
-        activity = {"last_narration": time.monotonic()}
+        activity = {"last_narration": time.monotonic(), "busy": False}
+        wakeup_q = asyncio.Queue()
         poller = asyncio.create_task(agent_mod.status_monitor(session, watch))
-        pusher = asyncio.create_task(_status_push(watch, activity))
+        pusher = asyncio.create_task(_status_push(watch, activity, wakeup_q))
         try:
             if args.say:
                 turn = await _run(memory.context_messages(args.say), agent,
@@ -242,13 +248,36 @@ async def _amain():
                 return
 
             print(WELCOME)
+            print("> ", end="", flush=True)
             while True:
+                # A request is either a line the user typed or a wake-up
+                # from the status pusher (a task finished while this loop
+                # was idle - see StatusPusher). stdin is polled with
+                # select, never blocked on input(), so the wake-up can
+                # arrive while the REPL is waiting.
+                line = None
                 try:
-                    line = input("> ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\nBye - il browser e il server MCP si chiudono; un ciclo ancora in corso si ferma qui.")
-                    return
+                    ready, _, _ = select.select([sys.stdin], [], [], 0)
+                except (OSError, ValueError):
+                    ready = False
+                if ready:
+                    try:
+                        raw = sys.stdin.readline()
+                    except (OSError, ValueError):
+                        raw = None
+                    if raw == "":  # EOF (Ctrl+D): same exit as Ctrl+C
+                        print("\nBye - il browser e il server MCP si chiudono; un ciclo ancora in corso si ferma qui.")
+                        return
+                    line = raw.strip()
+                    if line:
+                        # A real request makes a pending wake-up obsolete:
+                        # the user's own turn will cover the result.
+                        while not wakeup_q.empty():
+                            wakeup_q.get_nowait()
+                if not line and not wakeup_q.empty():
+                    line = wakeup_q.get_nowait()
                 if not line:
+                    await asyncio.sleep(0.2)
                     continue
                 if line.lower() in ("quit", "exit"):
                     return
@@ -257,9 +286,14 @@ async def _amain():
                 # a bare "si"/"ok" gets its pending question injected
                 # explicitly, so the confirmation is never forgotten.
                 agent_mod.reset_wait_state()
-                turn = await _run(memory.context_messages(line), agent,
-                                  activity, watch)
+                activity["busy"] = True
+                try:
+                    turn = await _run(memory.context_messages(line), agent,
+                                      activity, watch)
+                finally:
+                    activity["busy"] = False
                 memory.record_turn(line, turn)
+                print("> ", end="", flush=True)
         finally:
             poller.cancel()
             pusher.cancel()
