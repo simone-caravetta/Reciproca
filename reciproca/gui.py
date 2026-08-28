@@ -11,6 +11,7 @@ that, so the CLI and the MCP server run identical sessions without any GUI.
 
 import json
 import os
+import queue
 import random
 import re
 import sys
@@ -381,51 +382,58 @@ def _search_decision(info):
     scoring decoupled from the follow it is now a phase the user is told about
     instead of a hidden tail of the session.
 
-    Built on the worker thread follow_cycle calls the hook from, the same
-    place the old askyesnocancel was; wait_window pumps the event loop the
-    same way. Closing the window counts as Discard.
+    The dialog is built on the main thread via root.after and the worker
+    blocks on a queue. The previous version built the Toplevel and called
+    grab_set/wait_window from the worker thread, racing with the main
+    thread's Tcl calls and intermittently wedging the event loop into a gray,
+    unresponsive dialog. Closing the window counts as Discard.
     """
-    decision = {"value": "discard"}
+    result = queue.Queue(maxsize=1)
 
-    def choose(value):
-        decision["value"] = value
-        dialog.destroy()
+    def _show():
+        def choose(value):
+            result.put(value)
+            dialog.destroy()
 
-    dialog = tk.Toplevel(root)
-    dialog.title("Search Complete")
-    dialog.resizable(True, True)
-    dialog.minsize(520, 230)
-    dialog.transient(root)
-    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("discard"))
+        dialog = tk.Toplevel(root)
+        dialog.title("Search Complete")
+        dialog.resizable(True, True)
+        dialog.minsize(520, 230)
+        dialog.transient(root)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("discard"))
 
-    # The text wraps at a fixed width instead of stretching the window to its
-    # longest line: on odd font metrics the window would otherwise size itself
-    # so wide that the buttons below got pushed off the visible area.
-    tk.Label(
-        dialog,
-        text=(
-            f"Found {info['ranked_count']} unique users from {info['hashtag_count']} hashtag(s).\n"
-            f"Highest frequency: {info['top_freq']} (appeared in {info['top_freq']} authors' followers).\n\n"
-            f"Unless you choose Discard, the results are saved to the queue\n"
-            f"and the semantic scoring of the top candidates runs automatically\n"
-            f"(visible on the Follow tab)."
-        ),
-        justify='left',
-        wraplength=460,
-        anchor='w',
-        padx=18,
-        pady=14,
-    ).pack()
+        # The text wraps at a fixed width instead of stretching the window to its
+        # longest line: on odd font metrics the window would otherwise size itself
+        # so wide that the buttons below got pushed off the visible area.
+        tk.Label(
+            dialog,
+            text=(
+                f"Found {info['ranked_count']} unique users from {info['hashtag_count']} hashtag(s).\n"
+                f"Highest frequency: {info['top_freq']} (appeared in {info['top_freq']} authors' followers).\n\n"
+                f"Unless you choose Discard, the results are saved to the queue\n"
+                f"and the semantic scoring of the top candidates runs automatically\n"
+                f"(visible on the Follow tab)."
+            ),
+            justify='left',
+            wraplength=460,
+            anchor='w',
+            padx=18,
+            pady=14,
+        ).pack()
 
-    buttons = ttk.Frame(dialog, padding=(18, 4, 18, 14))
-    buttons.pack()
-    ttk.Button(buttons, text="💾 Save to queue", command=lambda: choose("save_stop")).pack(side='left', padx=4)
-    ttk.Button(buttons, text="🚀 Save & follow now", command=lambda: choose("follow")).pack(side='left', padx=4)
-    ttk.Button(buttons, text="🗑️ Discard", command=lambda: choose("discard")).pack(side='left', padx=4)
+        buttons = ttk.Frame(dialog, padding=(18, 4, 18, 14))
+        buttons.pack()
+        for text, value in (
+            ("💾 Save to queue", "save_stop"),
+            ("🚀 Save & follow now", "follow"),
+            ("🗑️ Discard", "discard"),
+        ):
+            ttk.Button(buttons, text=text, command=lambda v=value: choose(v)).pack(side='left', padx=4)
 
-    dialog.grab_set()
-    dialog.wait_window()
-    return decision["value"]
+        dialog.grab_set()
+
+    root.after(0, _show)
+    return result.get()
 
 
 def _render_follow_result(result):
