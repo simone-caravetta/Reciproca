@@ -264,6 +264,24 @@ def remove_from_queue(username):
     save_queue([item for item in queue if queue_username(item) != username])
     return True
 
+def remove_users_from_queue(usernames):
+    """Remove a batch of usernames from the queue in a single load/save.
+
+    Returns how many entries were actually removed. Used to undo the per-author
+    live checkpoint when the user discards a scrape's results.
+    """
+    to_remove = set(usernames)
+    if not to_remove:
+        return 0
+    queue = load_queue()
+    if not queue:
+        return 0
+    kept = [item for item in queue if queue_username(item) not in to_remove]
+    removed = len(queue) - len(kept)
+    if removed:
+        save_queue(kept)
+    return removed
+
 def clear_queue():
     """Clear the entire queue."""
     save_queue([])

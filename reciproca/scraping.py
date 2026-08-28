@@ -697,6 +697,16 @@ def scrape_and_fill_queue(hashtags, add_to_queue_limit=0):
                 state.live_frequencies = current_frequencies.copy()  # Mirror current frequencies
                 hooks.update_live_extraction_display()
 
+                # Checkpoint: merge this session's finds into the queue file now,
+                # so a crash or a brutal close loses at most the author currently
+                # being read. add_to_queue is idempotent and re-ranks the queue
+                # with the freshest frequencies, which were saved above. A failed
+                # save must not kill the scrape - the next author retries it.
+                try:
+                    add_to_queue(list(dict.fromkeys(state.live_extracted_users)))
+                except Exception as e:
+                    log(f"⚠️ Queue checkpoint failed after {username}: {brief_error(e)}", 'warning')
+
                 # Skip authors with very high follower counts to avoid throttling
                 if len(users) < 5:
                     log(f"⏭️ Skipping future posts from {username} (too few extracted, likely throttled)", 'warning')

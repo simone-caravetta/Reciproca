@@ -376,14 +376,13 @@ def reset_unfollow_app():
 def _search_decision(info):
     """The dialog after a search, as a follow_cycle decision hook.
 
-    Three named buttons rather than a yes/no/cancel: the choices are actions,
-    not answers, so they are labeled as such. The semantic scoring of the top
-    candidates is the common next step and is announced here, because with the
-    scoring decoupled from the follow it is now a phase the user is told about
-    instead of a hidden tail of the session.
+    A custom popup rather than a yes/no/cancel: the user decides whether to
+    save the results at all, and the save itself is configurable - run the
+    semantic scoring pass, follow straight away, or both. The defaults match
+    the old three-button flow: save with scoring, follow manually later.
 
     The dialog is built on the main thread via root.after and the worker
-    blocks on a queue. The previous version built the Toplevel and called
+    blocks on a queue. The version before that built the Toplevel and called
     grab_set/wait_window from the worker thread, racing with the main
     thread's Tcl calls and intermittently wedging the event loop into a gray,
     unresponsive dialog. Closing the window counts as Discard.
@@ -391,16 +390,17 @@ def _search_decision(info):
     result = queue.Queue(maxsize=1)
 
     def _show():
-        def choose(value):
-            result.put(value)
+        def choose(payload):
+            result.put(payload)
             dialog.destroy()
 
         dialog = tk.Toplevel(root)
         dialog.title("Search Complete")
         dialog.resizable(True, True)
-        dialog.minsize(520, 230)
+        dialog.minsize(520, 300)
         dialog.transient(root)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("discard"))
+        dialog.protocol("WM_DELETE_WINDOW",
+                        lambda: choose({"save": False, "scoring": False, "follow": False}))
 
         # The text wraps at a fixed width instead of stretching the window to its
         # longest line: on odd font metrics the window would otherwise size itself
@@ -410,9 +410,7 @@ def _search_decision(info):
             text=(
                 f"Found {info['ranked_count']} unique users from {info['hashtag_count']} hashtag(s).\n"
                 f"Highest frequency: {info['top_freq']} (appeared in {info['top_freq']} authors' followers).\n\n"
-                f"Unless you choose Discard, the results are saved to the queue\n"
-                f"and the semantic scoring of the top candidates runs automatically\n"
-                f"(visible on the Follow tab)."
+                f"What should happen with these results?"
             ),
             justify='left',
             wraplength=460,
@@ -421,14 +419,37 @@ def _search_decision(info):
             pady=14,
         ).pack()
 
-        buttons = ttk.Frame(dialog, padding=(18, 4, 18, 14))
+        opts = ttk.Frame(dialog, padding=(18, 0, 18, 0))
+        opts.pack(fill='x')
+        save_var = tk.BooleanVar(value=True)
+        scoring_var = tk.BooleanVar(value=True)
+        follow_var = tk.BooleanVar(value=False)
+
+        def _sync_checkboxes():
+            enabled = 'normal' if save_var.get() else 'disabled'
+            scoring_chk.configure(state=enabled)
+            follow_chk.configure(state=enabled)
+
+        save_chk = ttk.Checkbutton(opts, text="💾 Save to queue",
+                                   variable=save_var, command=_sync_checkboxes)
+        save_chk.pack(anchor='w')
+        scoring_chk = ttk.Checkbutton(opts, text="🧠 Run semantic scoring",
+                                      variable=scoring_var)
+        scoring_chk.pack(anchor='w', padx=(18, 0))
+        follow_chk = ttk.Checkbutton(opts, text="🚀 Follow now",
+                                     variable=follow_var)
+        follow_chk.pack(anchor='w', padx=(18, 0))
+
+        buttons = ttk.Frame(dialog, padding=(18, 10, 18, 14))
         buttons.pack()
-        for text, value in (
-            ("💾 Save to queue", "save_stop"),
-            ("🚀 Save & follow now", "follow"),
-            ("🗑️ Discard", "discard"),
-        ):
-            ttk.Button(buttons, text=text, command=lambda v=value: choose(v)).pack(side='left', padx=4)
+        ttk.Button(buttons, text="✅ Apply", command=lambda: choose({
+            "save": save_var.get(),
+            "scoring": scoring_var.get(),
+            "follow": follow_var.get(),
+        })).pack(side='left', padx=4)
+        ttk.Button(buttons, text="🗑️ Discard", command=lambda: choose({
+            "save": False, "scoring": False, "follow": False,
+        })).pack(side='left', padx=4)
 
         dialog.grab_set()
 
@@ -451,10 +472,18 @@ def _render_follow_result(result):
         return
 
     if result.get("branch") == "save_stop":
+        # With the per-author checkpoint the users are already in the queue when
+        # this dialog shows, so "added" is usually 0 - say what actually happened
+        # instead of claiming nothing was saved.
+        added = result.get('added', 0)
+        if added:
+            saved = f"{added} users saved to queue."
+        else:
+            saved = (f"All {result.get('ranked_count', 0)} found users were already "
+                     f"saved to the queue during the search (per-author checkpoint).")
         messagebox.showinfo(
             "Saved to Queue",
-            f"{result.get('added', 0)} users saved to queue.\n\n"
-            f"Click 'Start Following' in the GUI to begin following."
+            f"{saved}\n\nClick 'Start Following' in the GUI to begin following."
         )
         return
 

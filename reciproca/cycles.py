@@ -29,6 +29,7 @@ from reciproca.queue import (
     add_to_queue,
     load_queue,
     ranking_frequencies,
+    remove_users_from_queue,
     validate_queue,
 )
 from reciproca.scraping import scrape_and_fill_queue
@@ -48,10 +49,10 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
 
     In search mode, once the scrape is done the decision of what to do with the
     results is asked: if `decision_hook` is given it is called with
-    {"ranked_count", "top_freq", "hashtag_count"} and must return one of
-    "follow" | "save_stop" | "discard"; otherwise `after_search` is used
-    directly. The GUI passes a hook wrapping its dialog; the CLI and MCP pass
-    the flag.
+    {"ranked_count", "top_freq", "hashtag_count"} and returns either a dict
+    {"save", "scoring", "follow"} (the GUI's custom dialog) or one of the plain
+    strings "follow" | "save_stop" | "discard"; otherwise `after_search` is
+    used directly. The CLI and MCP pass the string.
 
     `score_after_search` says whether the semantic scoring pass runs on the
     saved results inside this session (the GUI's flow: score right after the
@@ -152,15 +153,46 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
             else:
                 decision = after_search
 
-            if decision == "discard":  # CANCEL - discard and stop
+            # The GUI's hook returns a dict {"save", "scoring", "follow"} so the
+            # save itself is configurable; CLI and MCP pass the plain string,
+            # which maps onto the same choices the old flags made.
+            if isinstance(decision, dict):
+                save, scoring, follow = (
+                    decision.get("save", True),
+                    decision.get("scoring", False),
+                    decision.get("follow", False),
+                )
+            else:
+                save = decision != "discard"
+                scoring = score_after_search
+                follow = decision == "follow"
+
+            if not save:  # CANCEL - discard and stop
                 log("❌ Scraping cancelled by user", 'warning')
+                # Users were checkpointed into the queue per author for crash
+                # safety; Discard must undo that so it still means "not queued".
+                if state.live_extracted_users:
+                    try:
+                        removed = remove_users_from_queue(
+                            list(dict.fromkeys(state.live_extracted_users)))
+                        if removed:
+                            log(f"🗑️ Removed {removed} users from queue (discard)", 'warning')
+                        hooks.refresh_queue_display()
+                    except Exception as e:
+                        log(f"⚠️ Could not fully undo checkpoint: {brief_error(e)}", 'warning')
                 return {**result, "branch": "discard"}
 
-            # Add top 500 users to queue (always, regardless of choice)
+            # Add top 500 users to queue (always, regardless of choice). With the
+            # per-author checkpoint the users are usually already there; this is
+            # the belt-and-suspenders final merge, and the log reports only what
+            # is genuinely new so it does not claim a save.
             users_to_add = ranked_users[:500]
             new_count, total_count = add_to_queue(users_to_add)
             result["added"] = new_count
-            log(f"✅ Added top {len(users_to_add)} users to queue (out of {len(ranked_users)} total found)", 'success')
+            if new_count:
+                log(f"✅ Added {new_count} users to queue (out of {len(ranked_users)} total found)", 'success')
+            else:
+                log(f"✅ All {len(ranked_users)} found users were already checkpointed into the queue", 'success')
             log(f"📋 Queue now has {total_count} users total", 'info')
             hooks.refresh_queue_display()
             hooks.update_live_extraction_display()
@@ -172,22 +204,27 @@ def follow_cycle(mode="search", delay_min=None, delay_max=None, limit=None,
             #
             # Both answers that keep the results get scored, including the one that
             # follows straight away - which is the whole point, since that is the
-            # run whose order the scoring changes. The GUI keeps this on (the pass
-            # is a visible phase on the Follow tab); CLI and MCP can switch it off
-            # with score_after_search=False and score through their own commands.
-            if score_after_search:
+            # run whose order the scoring changes. The GUI keeps the choice in the
+            # dialog now; CLI and MCP can switch it off with score_after_search=False
+            # and score through their own commands.
+            if scoring:
+                # A Stop pressed during the search disabled the Stop buttons
+                # (on_stop_clicked) and nothing re-enabled them, yet the scoring
+                # pass has its own stop flag - scoring_stop - that the next Stop
+                # press would set. Bring the buttons back in line with the state.
+                hooks.update_follow_ui_state()
                 try:
                     run_scoring_pass(after_stop=state.stop_requested.is_set())
                 except Exception as e:
                     log(f"❌ Scoring pass failed: {brief_error(e)}", 'error')
                     logger.exception("The scoring pass failed")
 
-            if decision == "save_stop":  # YES - Save to queue and STOP
+            if not follow:  # Save to queue and STOP
                 log("🛑 Scraping complete. Start following manually when ready.", 'success')
                 result["report"] = state.stats.report()
                 return {**result, "branch": "save_stop"}
 
-            # NO - Save to queue and START following now
+            # Save to queue and START following now
             queue = load_queue()
             result["followed"] = follow_from_queue(queue, delay_min, delay_max, limit)
             result["branch"] = "follow"

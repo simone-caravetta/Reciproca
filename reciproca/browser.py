@@ -413,7 +413,10 @@ def stop_bot():
             ]
             if ranked_users:
                 new_count, total_count = add_to_queue(ranked_users)
-                log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
+                # The per-author checkpoint usually saved these already; report
+                # only what is genuinely new so the log does not claim a save.
+                if new_count:
+                    log(f"💾 Saved {new_count} users to queue (stop detected during extraction)", 'success')
                 hooks.refresh_queue_display()
         else:
             # If we're stopping during follow (not extraction), just validate the queue
