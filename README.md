@@ -1,5 +1,8 @@
 <img width="645" height="176" alt="Instagram Insights: 10,263 followers, +75.2% over 90 days" src="https://github.com/user-attachments/assets/9b85f505-a886-4b1f-ba0a-33323665f4e8" />
 
+<img width="1774" height="887" alt="ChatGPT Image Sep 10, 2026, 08_55_00 PM" src="https://github.com/user-attachments/assets/dc928e72-35b2-4c18-b5ec-bfb0e04daf6e" />
+
+
 # Reciproca
 
 Desktop tool (Python, Tkinter, Selenium) for **testing growth strategies** on your own
